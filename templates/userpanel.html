@@ -306,6 +306,7 @@
                         <ul>
                             {% for site in user_blacklist %}
                                 <li class="blacklist-item">
+                                    {% if caps.panel.blacklist_manage %}
                                     <form method="POST" action="/admin/remove_blacklist">
                                         <input type="hidden" name="site" value="{{ site }}">
                                         <button type="submit" class="btn btn-remove" title="حذف"><i class="fas fa-times"></i></button>
