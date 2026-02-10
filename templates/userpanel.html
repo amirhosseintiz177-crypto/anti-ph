@@ -113,6 +113,14 @@
         .system-log .log-message.startup-msg { color: var(--success-color); }
         .system-log .log-message.error-msg { color: var(--danger-color); }
         .analysis-result { background: #000; border: 1px solid var(--border-color); padding: 20px; margin-top: 20px; border-radius: 8px; font-family: 'Share Tech Mono', monospace; line-height: 1.8; }
+        .scan-textarea { width: 100%; min-height: 140px; resize: vertical; padding: 12px; border: 1px solid var(--border-color); border-radius: 8px; background: rgba(0, 0, 0, 0.2); color: var(--text-primary); font-family: inherit; font-size: 1rem; box-sizing: border-box; }
+        .scan-results-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        .scan-results-table th, .scan-results-table td { padding: 10px; text-align: right; font-size: 0.9rem; border-bottom: 1px solid var(--border-color); }
+        .badge { padding: 3px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: bold; display: inline-block; }
+        .badge-safe { background: rgba(0, 255, 157, 0.2); color: var(--success-color); border: 1px solid var(--success-color); }
+        .badge-danger { background: rgba(255, 59, 59, 0.2); color: var(--danger-color); border: 1px solid var(--danger-color); }
+        .badge-warn { background: rgba(255, 196, 0, 0.2); color: var(--warning-color); border: 1px solid var(--warning-color); }
+        .redirect-chain { color: var(--text-secondary); font-size: 0.8rem; direction: ltr; }
         .user-list { list-style: none; padding: 0; }
         .user-list li { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px dashed var(--border-color); }
         .user-list li:last-child { border-bottom: none; }
@@ -153,6 +161,7 @@
             <span><i class="fas fa-globe"></i> جهانی: <strong>{{ "{:,}".format(trusted_count | int) }}</strong></span>
             <span><i class="fas fa-user-check"></i> مورد اعتماد: <strong>{{ user_trusted|length }}</strong></span>
             <span><i class="fas fa-ban"></i> لیست سیاه: <strong>{{ user_blacklist|length }}</strong></span> <span><i class="fas fa-flag"></i> گزارش‌ها: <strong>{{ recent|length }}</strong></span>
+            <span><i class="fas fa-layer-group"></i> Rank: <strong>{{ user_rank }}</strong></span>
         </div>
     </div>
 
@@ -164,7 +173,13 @@
 
         <div class="tabs-nav">
             <button class="tab-button active" data-tab="dashboard"><i class="fas fa-tachometer-alt"></i> داشبورد</button>
+            {% if caps.panel.scan_text %}
+            <button class="tab-button" data-tab="scanner"><i class="fas fa-search"></i> اسکن</button>
+            {% endif %}
+            
+            {% if caps.panel.domains_tab %}
             <button class="tab-button" data-tab="domains"><i class="fas fa-list-alt"></i> مدیریت دامنه‌ها</button>
+            {% endif %}
             <button class="tab-button" data-tab="logs"><i class="fas fa-file-alt"></i> گزارش‌ها</button>
             </div>
 
@@ -187,11 +202,18 @@
             </div>
             
             <div class="settings-grid">
+                {% if caps.panel.live_feed %}
                 <div class="card"> <h2><i class="fas fa-satellite-dish"></i> فید زنده گزارش‌ها (LIVE FEED)</h2>
                     <div id="live-log-feed" class="system-log">
                         <p class="log-message startup-msg">// Awaiting new reports via WebSocket...</p>
                     </div>
                 </div>
+                {% else %}
+                <div class="card" style="opacity: 0.5;">
+                    <h2><i class="fas fa-satellite-dish"></i> Live Feed</h2>
+                    <p>Access limited for your rank.</p>
+                </div>
+                {% endif %}
                 <div class="card" style="opacity: 0.5;">
                     <h2><i class="fas fa-info-circle"></i> راهنما</h2>
                     <p>از تب "مدیریت دامنه‌ها" می‌توانید لیست سفید و سیاه شخصی خود را مدیریت کنید.</p>
@@ -199,22 +221,67 @@
             </div>
         </div>
 
+                        {% if caps.panel.scan_text %}
+        <div id="scanner" class="tab-content">
+            <div class="settings-grid">
+                <div class="card"> <h2><i class="fas fa-search"></i> اسکن متن</h2>
+                    <p>لینک‌های داخل متن را استخراج و بررسی می‌کند.</p>
+                    <textarea id="scan-text" class="scan-textarea" placeholder="متن یا ایمیل را اینجا قرار دهید..."></textarea>
+                    <div class="form-row" style="margin-top: 10px;">
+                        {% if caps.panel.redirect_chain %}
+                        <label style="display:flex; align-items:center; gap:6px;">
+                            <input type="checkbox" id="scan-redirects">
+                            بررسی ریدایرکت‌ها
+                        </label>
+                        {% endif %}
+                        <button id="scan-text-btn" class="btn btn-primary"><i class="fas fa-play"></i> اسکن</button>
+                    </div>
+                </div>
+                <div class="card"> <h2><i class="fas fa-file-import"></i> اسکن فایل</h2>
+                    {% if caps.panel.scan_file %}
+                    <input type="file" id="scan-file" accept=".txt,.eml">
+                    <button id="scan-file-btn" class="btn btn-success" style="margin-top:10px;"><i class="fas fa-upload"></i> بارگذاری و اسکن</button>
+                    {% else %}
+                    <p style="color: var(--warning-color); font-style: italic;">دسترسی برای رنک شما محدود است.</p>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="card"> <h2><i class="fas fa-list"></i> نتایج</h2>
+                <div id="scan-summary" class="log-message"></div>
+                <div id="scan-results"></div>
+            </div>
+            <div class="card"> <h2><i class="fas fa-history"></i> تاریخچه اسکن</h2>
+                {% if caps.panel.export_history %}
+                <button id="export-history" class="btn btn-primary"><i class="fas fa-download"></i> خروجی CSV</button>
+                {% endif %}
+                <div id="scan-history" style="margin-top: 15px;"></div>
+            </div>
+        </div>
+        {% endif %}
+
+        {% if caps.panel.domains_tab %}
         <div id="domains" class="tab-content">
             <div class="settings-grid list-management"> <div class="card"> <h2><i class="fas fa-heart"></i> لیست سفید (Whitelist)</h2>
                     <p>دامنه‌هایی که هرگز نباید بلاک شوند.</p>
+                    {% if caps.panel.whitelist_manage %}
                     <form method="POST" action="/admin/add_trusted" class="form-row">
                         <input type="text" name="site" placeholder="example.com" required>
                         <button type="submit" class="btn btn-success"><i class="fas fa-plus-circle"></i> افزودن</button>
                     </form>
+                    {% else %}
+                        <p style="color: var(--warning-color); font-style: italic;">Access limited for your rank.</p>
+                    {% endif %}
                     <h3>دامنه‌های موجود:</h3>
                     {% if user_trusted %}
                         <ul>
                             {% for site in user_trusted %}
                                 <li>
+                                    {% if caps.panel.whitelist_manage %}
                                     <form method="POST" action="/admin/remove_trusted">
                                         <input type="hidden" name="site" value="{{ site }}">
                                         <button type="submit" class="btn btn-remove" title="حذف"><i class="fas fa-times"></i></button>
                                     </form>
+                                    {% endif %}
                                     <span>{{ site }}</span>
                                 </li>
                             {% endfor %}
@@ -224,12 +291,16 @@
                     {% endif %}
                 </div>
 
+                {% if caps.panel.blacklist_manage %}
                 <div class="card"> <h2><i class="fas fa-ban"></i> لیست سیاه (Blacklist)</h2>
                     <p>دامنه‌هایی که همیشه باید بلاک شوند.</p>
                     <form method="POST" action="/admin/add_blacklist" class="form-row">
                         <input type="text" name="site" placeholder="bad-site.com" required>
                         <button type="submit" class="btn btn-danger"><i class="fas fa-plus-circle"></i> افزودن</button>
                     </form>
+                    {% else %}
+                        <p style="color: var(--warning-color); font-style: italic;">Access limited for your rank.</p>
+                    {% endif %}
                     <h3>دامنه‌های بلاک شده:</h3>
                     {% if user_blacklist %}
                         <ul>
@@ -239,6 +310,7 @@
                                         <input type="hidden" name="site" value="{{ site }}">
                                         <button type="submit" class="btn btn-remove" title="حذف"><i class="fas fa-times"></i></button>
                                     </form>
+                                    {% endif %}
                                     <span>{{ site }}</span>
                                 </li>
                             {% endfor %}
@@ -251,6 +323,7 @@
         </div>
 
 
+        {% endif %}
         <div id="logs" class="tab-content">
             <div class="card">
                 <h2><i class="fas fa-file-alt"></i> گزارش‌های اخیر تشخیص فیشینگ (LOGS)</h2>
@@ -282,16 +355,20 @@
                                         onclick="openLogDetails('{{ r.url }}', '{{ r.domain }}', {{ r.probability }}, '{{ r.similar_to or '—' }}', {{ r.reasons|tojson|safe }})">
                                         <i class="fas fa-search"></i> بررسی
                                     </button>
+                                    {% if caps.panel.quick_whitelist %}
                                     <button class="btn btn-success btn-small btn-quick-whitelist"
                                             title="افزودن به لیست سفید"
                                             onclick="quickAction('add_trusted', '{{ r.domain }}')">
                                         <i class="fas fa-heart" style="margin: 0;"></i>
                                     </button>
+                                    {% endif %}
+                                    {% if caps.panel.quick_blacklist %}
                                     <button class="btn btn-danger btn-small"
                                             title="افزودن به لیست سیاه"
                                             onclick="quickAction('add_blacklist', '{{ r.domain }}')">
                                         <i class="fas fa-ban" style="margin: 0;"></i>
                                     </button>
+                                    {% endif %}
                                 </td>
                             </tr>
                             {% endfor %}
@@ -318,8 +395,10 @@
                 <p><strong>احتمال:</strong> <span id="modal-prob" class="prob-high">...</span></p>
                 <p><strong>مشابهت:</strong> <span id="modal-similar">...</span></p>
                 <hr style="border-color: var(--border-color); border-style: dashed;">
+                {% if caps.panel.show_reasons %}
                 <p><strong>دلایل فنی (Reasons):</strong></p>
                 <div id="modal-reasons" style="font-size: 0.9rem; color: var(--text-secondary); padding-right: 15px;"></div>
+                {% endif %}
             </div>
         </div>
     </div>
@@ -396,9 +475,136 @@
                     typeWriter();
                  }, 500);
             }
-        });
+                        // --- Scan Text/File Logic ---
+            const scanTextBtn = document.getElementById('scan-text-btn');
+            const scanFileBtn = document.getElementById('scan-file-btn');
+            const scanTextArea = document.getElementById('scan-text');
+            const scanResultsEl = document.getElementById('scan-results');
+            const scanSummaryEl = document.getElementById('scan-summary');
+            const scanHistoryEl = document.getElementById('scan-history');
+            const exportHistoryBtn = document.getElementById('export-history');
 
-        // --- Sensitivity Slider (REMOVED) ---
+            function escapeHtml(s) {
+                if (!s) return '';
+                return s.replace(/[&<>"'`]/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;'}[m]));
+            }
+
+            function statusBadge(status) {
+                if (status === 'PHISHING') return '<span class="badge badge-danger">PHISHING</span>';
+                if (status === 'SAFE') return '<span class="badge badge-safe">SAFE</span>';
+                return '<span class="badge badge-warn">ERROR</span>';
+            }
+
+            function renderScanResults(data) {
+                if (!scanResultsEl || !scanSummaryEl) return;
+                if (!data || !data.results || data.results.length === 0) {
+                    scanSummaryEl.textContent = 'لینکی پیدا نشد.';
+                    scanResultsEl.innerHTML = '';
+                    return;
+                }
+                const s = data.summary || {};
+                scanSummaryEl.textContent = `تعداد لینک: ${s.total || data.results.length} | فیشینگ: ${s.phishing || 0} | ایمن: ${s.safe || 0}`;
+                let html = '<table class="scan-results-table"><thead><tr><th>لینک</th><th>وضعیت</th><th>احتمال</th><th>دلیل کوتاه</th><th>ریدایرکت</th></tr></thead><tbody>';
+                data.results.forEach(item => {
+                    const chain = item.redirect_chain && item.redirect_chain.length > 1 ? `<div class="redirect-chain">${item.redirect_chain.map(u => escapeHtml(u)).join(' ? ')}</div>` : '';
+                    html += `<tr>
+                        <td style="direction:ltr;"><a href="${escapeHtml(item.url)}" target="_blank">${escapeHtml(item.url)}</a></td>
+                        <td>${statusBadge(item.status)}</td>
+                        <td>${item.probability ?? 0}%</td>
+                        <td>${escapeHtml(item.short_reason || '')}</td>
+                        <td>${chain}</td>
+                    </tr>`;
+                });
+                html += '</tbody></table>';
+                scanResultsEl.innerHTML = html;
+            }
+
+            async function loadScanHistory() {
+                if (!scanHistoryEl) return;
+                try {
+                    const res = await fetch('/api/scan_history');
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    const history = data.history || [];
+                    if (history.length === 0) {
+                        scanHistoryEl.textContent = 'تاریخچه‌ای موجود نیست.';
+                        return;
+                    }
+                    let html = '<table class="scan-results-table"><thead><tr><th>زمان</th><th>کل</th><th>فیشینگ</th><th>ایمن</th></tr></thead><tbody>';
+                    history.forEach(h => {
+                        html += `<tr><td>${escapeHtml(h.time || '')}</td><td>${h.total || 0}</td><td>${h.phishing || 0}</td><td>${h.safe || 0}</td></tr>`;
+                    });
+                    html += '</tbody></table>';
+                    scanHistoryEl.innerHTML = html;
+                } catch (e) {
+                    scanHistoryEl.textContent = 'خطا در دریافت تاریخچه.';
+                }
+            }
+
+            if (scanTextBtn && scanTextArea) {
+                scanTextBtn.addEventListener('click', async () => {
+                    scanTextBtn.disabled = true;
+                    if (scanSummaryEl) scanSummaryEl.textContent = 'در حال اسکن...';
+                    const includeRedirects = document.getElementById('scan-redirects')?.checked || false;
+                    try {
+                        const res = await fetch('/api/scan_text', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ text: scanTextArea.value || '', include_redirects: includeRedirects })
+                        });
+                        const data = await res.json();
+                        if (!res.ok) {
+                            if (scanSummaryEl) scanSummaryEl.textContent = data.error || 'خطا در اسکن.';
+                        } else {
+                            renderScanResults(data);
+                            loadScanHistory();
+                        }
+                    } catch (e) {
+                        if (scanSummaryEl) scanSummaryEl.textContent = 'خطای شبکه.';
+                    } finally {
+                        scanTextBtn.disabled = false;
+                    }
+                });
+            }
+
+            if (scanFileBtn) {
+                scanFileBtn.addEventListener('click', async () => {
+                    const fileInput = document.getElementById('scan-file');
+                    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+                        if (scanSummaryEl) scanSummaryEl.textContent = 'فایلی انتخاب نشده.';
+                        return;
+                    }
+                    scanFileBtn.disabled = true;
+                    if (scanSummaryEl) scanSummaryEl.textContent = 'در حال اسکن فایل...';
+                    const includeRedirects = document.getElementById('scan-redirects')?.checked || false;
+                    const formData = new FormData();
+                    formData.append('file', fileInput.files[0]);
+                    formData.append('include_redirects', includeRedirects ? 'true' : 'false');
+                    try {
+                        const res = await fetch('/api/scan_file', { method: 'POST', body: formData });
+                        const data = await res.json();
+                        if (!res.ok) {
+                            if (scanSummaryEl) scanSummaryEl.textContent = data.error || 'خطا در اسکن فایل.';
+                        } else {
+                            renderScanResults(data);
+                            loadScanHistory();
+                        }
+                    } catch (e) {
+                        if (scanSummaryEl) scanSummaryEl.textContent = 'خطای شبکه.';
+                    } finally {
+                        scanFileBtn.disabled = false;
+                    }
+                });
+            }
+
+            if (exportHistoryBtn) {
+                exportHistoryBtn.addEventListener('click', () => {
+                    window.location.href = '/api/export_scan_history';
+                });
+            }
+
+            loadScanHistory();
+// --- Sensitivity Slider (REMOVED) ---
 
         // --- Shutdown (REMOVED) ---
 
@@ -412,7 +618,7 @@
         // --- Modal (Kept) ---
         const modal = document.getElementById('log-details-modal');
         function openLogDetails(url, domain, prob, similar, reasons_array) { /* ... (کد قبلی بدون تغییر) ... */
-            document.getElementById('modal-full-url').textContent = url; document.getElementById('modal-domain').textContent = domain; document.getElementById('modal-prob').textContent = `${prob}%`; document.getElementById('modal-similar').textContent = similar || 'N/A'; const probEl = document.getElementById('modal-prob'); probEl.className = ''; if (prob >= 90) probEl.classList.add('prob-high'); else if (prob > 70) probEl.classList.add('prob-medium'); else probEl.classList.add('prob-low'); const reasonsContainer = document.getElementById('modal-reasons'); reasonsContainer.innerHTML = ''; if (reasons_array && reasons_array.length > 0) { reasons_array.forEach(reason => { reasonsContainer.innerHTML += `<span>- ${reason}</span><br>`; }); } else { reasonsContainer.innerHTML = '<span>- N/A</span>'; } modal.classList.add('active');
+            document.getElementById('modal-full-url').textContent = url; document.getElementById('modal-domain').textContent = domain; document.getElementById('modal-prob').textContent = `${prob}%`; document.getElementById('modal-similar').textContent = similar || 'N/A'; const probEl = document.getElementById('modal-prob'); probEl.className = ''; if (prob >= 90) probEl.classList.add('prob-high'); else if (prob > 70) probEl.classList.add('prob-medium'); else probEl.classList.add('prob-low'); const reasonsContainer = document.getElementById('modal-reasons'); if (reasonsContainer) { reasonsContainer.innerHTML = ''; if (reasons_array && reasons_array.length > 0) { reasons_array.forEach(reason => { reasonsContainer.innerHTML += `<span>- ${reason}</span><br>`; }); } else { reasonsContainer.innerHTML = '<span>- N/A</span>'; } } modal.classList.add('active');
         }
         function closeModal() { modal.classList.remove('active'); }
         function closeModalIfOutside(event) { if (event.target === modal) closeModal(); }
