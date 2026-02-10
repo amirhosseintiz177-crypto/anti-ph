@@ -504,14 +504,16 @@
                 }
                 const s = data.summary || {};
                 scanSummaryEl.textContent = `تعداد لینک: ${s.total || data.results.length} | فیشینگ: ${s.phishing || 0} | ایمن: ${s.safe || 0}`;
-                let html = '<table class="scan-results-table"><thead><tr><th>لینک</th><th>وضعیت</th><th>احتمال</th><th>دلیل کوتاه</th><th>ریدایرکت</th></tr></thead><tbody>';
+                let html = '<table class="scan-results-table"><thead><tr><th>لینک</th><th>وضعیت</th><th>احتمال</th><th>دلیل کوتاه</th><th>نشانه\u200cها</th><th>ریدایرکت</th></tr></thead><tbody>';
                 data.results.forEach(item => {
                     const chain = item.redirect_chain && item.redirect_chain.length > 1 ? `<div class="redirect-chain">${item.redirect_chain.map(u => escapeHtml(u)).join(' ? ')}</div>` : '';
+                    const indicators = (item.indicators || []).map(i => `<span class="badge badge-warn">${escapeHtml(i)}</span>`).join(' ');
                     html += `<tr>
                         <td style="direction:ltr;"><a href="${escapeHtml(item.url)}" target="_blank">${escapeHtml(item.url)}</a></td>
                         <td>${statusBadge(item.status)}</td>
                         <td>${item.probability ?? 0}%</td>
                         <td>${escapeHtml(item.short_reason || '')}</td>
+                        <td>${indicators}</td>
                         <td>${chain}</td>
                     </tr>`;
                 });
