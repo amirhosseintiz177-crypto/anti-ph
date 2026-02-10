@@ -4,6 +4,9 @@ import threading
 import json
 import httpx
 import urllib.parse
+import re
+import io
+import csv
 import math
 import collections
 import asyncio
@@ -74,6 +77,179 @@ SECRET_KEY = os.environ.get("PHISH_SECRET_KEY", "your-default-very-secret-key-pl
 # ADMIN_PASS = os.environ.get("PHISH_ADMIN_PASS", "12345")
 SERVER_SENSITIVITY_FILE = data_file("server_sensitivity.json")
 
+RANKS = ["basic", "plus", "pro"]
+DEFAULT_RANK = "basic"
+RANK_CAPS = {
+    "basic": {
+        "extension": {
+            "sensitivity_control": False,
+            "history_clear": False,
+            "open_anyway": False,
+            "add_trusted": False,
+            "open_user_panel": True,
+            "show_admin_button": False,
+        },
+        "panel": {
+            "scan_text": True,
+            "scan_file": False,
+            "export_history": False,
+            "redirect_chain": False,
+            "domains_tab": False,
+            "whitelist_manage": False,
+            "blacklist_manage": False,
+            "live_feed": False,
+            "quick_whitelist": False,
+            "quick_blacklist": False,
+            "show_reasons": False,
+        },
+    },
+    "plus": {
+        "extension": {
+            "sensitivity_control": True,
+            "history_clear": True,
+            "open_anyway": False,
+            "add_trusted": True,
+            "open_user_panel": True,
+            "show_admin_button": False,
+        },
+        "panel": {
+            "scan_text": True,
+            "scan_file": True,
+            "export_history": True,
+            "redirect_chain": True,
+            "domains_tab": True,
+            "whitelist_manage": True,
+            "blacklist_manage": False,
+            "live_feed": True,
+            "quick_whitelist": True,
+            "quick_blacklist": False,
+            "show_reasons": True,
+        },
+    },
+    "pro": {
+        "extension": {
+            "sensitivity_control": True,
+            "history_clear": True,
+            "open_anyway": True,
+            "add_trusted": True,
+            "open_user_panel": True,
+            "show_admin_button": False,
+        },
+        "panel": {
+            "scan_text": True,
+            "scan_file": True,
+            "export_history": True,
+            "redirect_chain": True,
+            "domains_tab": True,
+            "whitelist_manage": True,
+            "blacklist_manage": True,
+            "live_feed": True,
+            "quick_whitelist": True,
+            "quick_blacklist": True,
+            "show_reasons": True,
+        },
+    },
+    "admin": {
+        "extension": {
+            "sensitivity_control": True,
+            "history_clear": True,
+            "open_anyway": True,
+            "add_trusted": True,
+            "open_user_panel": True,
+            "show_admin_button": True,
+        },
+        "panel": {
+            "scan_text": True,
+            "scan_file": True,
+            "export_history": True,
+            "redirect_chain": True,
+            "domains_tab": True,
+            "whitelist_manage": True,
+            "blacklist_manage": True,
+            "live_feed": True,
+            "quick_whitelist": True,
+            "quick_blacklist": True,
+            "show_reasons": True,
+        },
+    },
+}
+
+def _normalize_rank(rank: Optional[str]) -> str:
+    if not rank:
+        return DEFAULT_RANK
+    rank = rank.strip().lower()
+    return rank if rank in RANK_CAPS else DEFAULT_RANK
+
+def _get_caps_for_session(session: dict) -> Dict[str, Any]:
+    if session.get("is_admin"):
+        return RANK_CAPS["admin"]
+    return RANK_CAPS[_normalize_rank(session.get("rank"))]
+
+def _require_panel_cap(session: dict, cap_key: str):
+    caps = _get_caps_for_session(session)
+    if not caps.get("panel", {}).get(cap_key, False):
+        raise HTTPException(status_code=403, detail="Insufficient rank for this action.")
+
+URL_PATTERN = re.compile(r'(https?://[^\s<>"\'\)\]]+|www\.[^\s<>"\'\)\]]+)', re.IGNORECASE)
+BARE_DOMAIN_PATTERN = re.compile(r'(?<!@)(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s<>"\'\)\]]*)?', re.IGNORECASE)
+
+def _extract_links(text: str, limit: int = 50) -> List[str]:
+    if not text:
+        return []
+    links = []
+    seen = set()
+
+    for match in URL_PATTERN.findall(text):
+        url = match.rstrip('.,);]')
+        if url.lower().startswith('www.'):
+            url = f"http://{url}"
+        if url not in seen:
+            seen.add(url)
+            links.append(url)
+        if len(links) >= limit:
+            return links
+
+    for match in BARE_DOMAIN_PATTERN.findall(text):
+        domain = match.rstrip('.,);]')
+        # avoid duplicates already captured via full URL
+        if domain in seen:
+            continue
+        url = f"http://{domain}"
+        if url not in seen:
+            seen.add(url)
+            links.append(url)
+        if len(links) >= limit:
+            break
+
+    return links
+
+def _short_reason(reasons: List[str]) -> str:
+    if not reasons:
+        return "No reason"
+    text = " | ".join(reasons)
+    if "blacklist" in text.lower():
+        return "Blacklisted"
+    if "trusted by user" in text.lower():
+        return "Trusted (user)"
+    if "trusted globally" in text.lower():
+        return "Trusted (global)"
+    if "no trusted domain similar enough" in text.lower():
+        return "No similar trusted domain"
+    if "fuzzy match" in text.lower():
+        return "Looks similar to trusted domain"
+    if "ml risk score" in text.lower():
+        return "ML risk signal"
+    return reasons[0]
+
+async def _redirect_chain(url: str, max_hops: int = 8) -> List[str]:
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+            resp = await client.get(url)
+            chain = [str(r.url) for r in resp.history] + [str(resp.url)]
+            return chain[:max_hops]
+    except Exception:
+        return []
+
 app = FastAPI(title="Local Phishing Detector API")
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
@@ -89,14 +265,15 @@ app.add_middleware(
 templates = Jinja2Templates(directory="templates")
 
 # --- NEW --- Helper functions for user databases ---
-def _load_user_db(file_path: str, default_user: str, default_pass: str, default_name: str) -> Dict[str, Dict[str, str]]:
+def _load_user_db(file_path: str, default_user: str, default_pass: str, default_name: str, default_profile: Optional[Dict[str, str]] = None) -> Dict[str, Dict[str, str]]:
     """Loads a user database from a JSON file."""
     if not os.path.exists(file_path):
         # Create default admin if file doesn't exist
         # IMPORTANT: In production, hash the password!
         # hashed_pass = hashlib.sha256(default_pass.encode()).hexdigest()
+        profile = default_profile.copy() if default_profile else {}
         default_users = {
-            default_user: {"password": default_pass, "display_name": default_name}
+            default_user: {"password": default_pass, "display_name": default_name, **profile}
         }
         _save_user_db(file_path, default_users)
         return default_users
@@ -105,7 +282,8 @@ def _load_user_db(file_path: str, default_user: str, default_pass: str, default_
             return json.load(f)
     except Exception as e:
         print(f"Error loading user file {file_path}: {e}. Using default.")
-        return {default_user: {"password": default_pass, "display_name": default_name}}
+        profile = default_profile.copy() if default_profile else {}
+        return {default_user: {"password": default_pass, "display_name": default_name, **profile}}
 
 def _save_user_db(file_path: str, users: Dict[str, Dict[str, str]]):
     """Saves a user database to a JSON file."""
@@ -120,8 +298,31 @@ admin_users_db = _load_user_db(ADMIN_USERS_FILE, "admin", "12345", "Default Admi
 admin_users_lock = threading.Lock() # Lock for modifying admin users
 
 # --- NEW --- Load normal users at startup
-normal_users_db = _load_user_db(NORMAL_USERS_FILE, "user", "123", "Normal User")
+normal_users_db = _load_user_db(
+    NORMAL_USERS_FILE,
+    "user",
+    "123",
+    "Normal User",
+    default_profile={"rank": DEFAULT_RANK},
+)
 normal_users_lock = threading.Lock() # Lock for modifying normal users
+
+def _ensure_normal_user_ranks():
+    global normal_users_db
+    updated = False
+    for username, data in normal_users_db.items():
+        if not isinstance(data, dict):
+            normal_users_db[username] = {"password": "", "display_name": username, "rank": DEFAULT_RANK}
+            updated = True
+            continue
+        normalized_rank = _normalize_rank(data.get("rank"))
+        if data.get("rank") != normalized_rank:
+            data["rank"] = normalized_rank
+            updated = True
+    if updated:
+        _save_user_db(NORMAL_USERS_FILE, normal_users_db)
+
+_ensure_normal_user_ranks()
 
 
 # --- MLPhishingModel Class (Unchanged) ---
@@ -177,7 +378,7 @@ class PhishDetector:
     TRUSTED_CACHE = TRUSTED_GLOBAL_CACHE
     USER_TRUSTED_FILE = USER_TRUSTED_FILE
     # --- NEW --- Blacklist file constant
-    USER_BLACKLIST_FILE = "user_blacklist.json" # Corrected the constant from previous versions
+    USER_BLACKLIST_FILE = USER_BLACKLIST_FILE
     REPO_RAW_URL = "https://s27.uupload.ir/files/09171258914/cloudflare-radar_top-1000000-domains_20251103-20251110.csv" # Or your preferred source
     EXTENSION_FILE_INFO = "extension_file_info.json"
     EXTENSION_UPLOAD_DIR = "static/extension_files"
@@ -195,6 +396,8 @@ class PhishDetector:
         # --- NEW --- Blacklist store
         self.user_blacklist: Set[str] = set()
         self.reports: List[Dict[str, Any]] = []
+        self.scan_history_lock = threading.Lock()
+        self.scan_history: List[Dict[str, Any]] = []
         self.server_sensitivity = self._load_sensitivity(default=90) # Default sensitivity 90
 
         self.extension_filename: Optional[str] = None
@@ -379,6 +582,15 @@ class PhishDetector:
         report = {"url": url, "domain": domain, "probability": probability, "similar_to": similar_to, "reasons": reasons, "time": time.strftime("%Y-%m-%d %H:%M:%S")}
         with self.reports_lock: self.reports.insert(0, report); self.reports = self.reports[:1000] # Keep max 1000 reports
 
+    def add_scan_history(self, entry: Dict[str, Any]):
+        with self.scan_history_lock:
+            self.scan_history.insert(0, entry)
+            self.scan_history = self.scan_history[:500]
+
+    def get_scan_history(self, limit: int = 200) -> List[Dict[str, Any]]:
+        with self.scan_history_lock:
+            return self.scan_history[:limit]
+
     # --- NEW --- Method to clear reports
     def purge_reports(self):
         with self.reports_lock:
@@ -561,6 +773,127 @@ async def check_link_api(request: Request):
     except HTTPException as he: return JSONResponse(he.detail, status_code=he.status_code)
     except Exception: return JSONResponse({"is_phishing": False, "error": "Internal API error"}, status_code=500)
 
+async def _scan_links(text: str, include_redirects: bool, caps: Dict[str, Any]) -> Dict[str, Any]:
+    if include_redirects and not caps.get("panel", {}).get("redirect_chain", False):
+        include_redirects = False
+
+    links = _extract_links(text)
+    results = []
+    phishing_count = 0
+    safe_count = 0
+
+    async def _scan_one(url: str):
+        res = await detector.check_link(url)
+        status = "PHISHING" if res.get("is_phishing") else "SAFE"
+        short_reason = _short_reason(res.get("reasons", []))
+        chain = await _redirect_chain(url) if include_redirects else []
+        return {
+            "url": url,
+            "domain": res.get("domain"),
+            "status": status,
+            "probability": res.get("probability", 0),
+            "similar_to": res.get("similar_to"),
+            "reasons": res.get("reasons", []),
+            "short_reason": short_reason,
+            "redirect_chain": chain,
+        }
+
+    for url in links:
+        try:
+            item = await _scan_one(url)
+        except Exception as e:
+            item = {
+                "url": url,
+                "domain": "",
+                "status": "ERROR",
+                "probability": 0,
+                "similar_to": None,
+                "reasons": [str(e)],
+                "short_reason": "Error",
+                "redirect_chain": [],
+            }
+        results.append(item)
+        if item["status"] == "PHISHING":
+            phishing_count += 1
+        elif item["status"] == "SAFE":
+            safe_count += 1
+
+    history_entry = {
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "total": len(results),
+        "phishing": phishing_count,
+        "safe": safe_count,
+    }
+    detector.add_scan_history(history_entry)
+
+    return {
+        "links_found": len(links),
+        "summary": history_entry,
+        "results": results,
+    }
+
+@app.post("/api/scan_text", dependencies=[Depends(require_authenticated)])
+async def api_scan_text(request: Request):
+    try:
+        data = await request.json()
+        text = data.get("text", "")
+        include_redirects = bool(data.get("include_redirects", False))
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    session = request.session
+    caps = _get_caps_for_session(session)
+    if not caps.get("panel", {}).get("scan_text", False):
+        return JSONResponse({"error": "Insufficient rank"}, status_code=403)
+
+    result = await _scan_links(text, include_redirects, caps)
+    return JSONResponse(result)
+
+@app.post("/api/scan_file", dependencies=[Depends(require_authenticated)])
+async def api_scan_file(request: Request, file: UploadFile = File(...), include_redirects: bool = Form(False)):
+    session = request.session
+    caps = _get_caps_for_session(session)
+    if not caps.get("panel", {}).get("scan_file", False):
+        return JSONResponse({"error": "Insufficient rank"}, status_code=403)
+
+    content = await file.read()
+    text = ""
+    for enc in ("utf-8", "utf-8-sig", "latin-1"):
+        try:
+            text = content.decode(enc)
+            break
+        except Exception:
+            continue
+    if not text:
+        return JSONResponse({"error": "Unable to decode file"}, status_code=400)
+
+    result = await _scan_links(text, include_redirects, caps)
+    return JSONResponse(result)
+
+@app.get("/api/scan_history", dependencies=[Depends(require_authenticated)])
+async def api_scan_history(request: Request):
+    session = request.session
+    caps = _get_caps_for_session(session)
+    if not caps.get("panel", {}).get("scan_text", False):
+        return JSONResponse({"error": "Insufficient rank"}, status_code=403)
+    return JSONResponse({"history": detector.get_scan_history()})
+
+@app.get("/api/export_scan_history", dependencies=[Depends(require_authenticated)])
+async def api_export_scan_history(request: Request):
+    session = request.session
+    caps = _get_caps_for_session(session)
+    if not caps.get("panel", {}).get("export_history", False):
+        return JSONResponse({"error": "Insufficient rank"}, status_code=403)
+    history = detector.get_scan_history(limit=10000)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["time", "total", "phishing", "safe"])
+    for row in history:
+        writer.writerow([row.get("time"), row.get("total"), row.get("phishing"), row.get("safe")])
+    csv_data = output.getvalue()
+    headers = {"Content-Disposition": "attachment; filename=scan_history.csv"}
+    return HTMLResponse(content=csv_data, headers=headers, media_type="text/csv")
+
 # --- Public Whitelist API (unchanged for now, admin handles this via form) ---
 @app.post("/add_trusted")
 async def add_trusted_api(request: Request):
@@ -610,6 +943,7 @@ async def login_post(request: Request, username: str = Form(...), password: str 
             request.session["is_admin"] = True
             request.session["username"] = username # Store username
             request.session["display_name"] = admin_user_data.get("display_name", username) # Store display name
+            request.session["rank"] = "admin"
             print(f"Admin login successful: {username}")
             return RedirectResponse(url=app.url_path_for("admin"), status_code=status.HTTP_302_FOUND)
         else:
@@ -627,6 +961,7 @@ async def login_post(request: Request, username: str = Form(...), password: str 
         request.session["is_admin"] = False
         request.session["username"] = username # Store username
         request.session["display_name"] = normal_user_data.get("display_name", username) # Store display name
+        request.session["rank"] = _normalize_rank(normal_user_data.get("rank"))
         return RedirectResponse(url=app.url_path_for("user_panel"), status_code=status.HTTP_302_FOUND)
 
     # 3. Failed (User not in admin list AND (not in normal list OR wrong pass for normal list))
@@ -649,12 +984,26 @@ async def api_extension_login(request: Request):
     # Check normal users first
     user_data = normal_users_db.get(username)
     if user_data and user_data.get("password") == password:
-        return JSONResponse({"success": True, "displayName": user_data.get("display_name", username)})
+        rank = _normalize_rank(user_data.get("rank"))
+        caps = RANK_CAPS[rank]
+        return JSONResponse({
+            "success": True,
+            "displayName": user_data.get("display_name", username),
+            "rank": rank,
+            "isAdmin": False,
+            "capabilities": caps,
+        })
         
     # Optional: Allow admins to log in to extension as well
     admin_data = admin_users_db.get(username)
     if admin_data and admin_data.get("password") == password:
-         return JSONResponse({"success": True, "displayName": admin_data.get("display_name", username) + " (Admin)"})
+         return JSONResponse({
+             "success": True,
+             "displayName": admin_data.get("display_name", username) + " (Admin)",
+             "rank": "admin",
+             "isAdmin": True,
+             "capabilities": RANK_CAPS["admin"],
+         })
 
     return JSONResponse({"success": False, "error": "نام کاربری یا رمز عبور اشتباه است."}, status_code=401)
 
@@ -693,6 +1042,8 @@ async def admin(request: Request, admin_username: str = Depends(require_admin)):
 async def user_panel(request: Request, session: dict = Depends(require_authenticated)):
     list_data = detector.get_list_data()
     reports = detector.get_reports()
+    caps = _get_caps_for_session(session)
+    rank = "admin" if session.get("is_admin") else _normalize_rank(session.get("rank"))
 
     context = {
         "request": request,
@@ -703,6 +1054,8 @@ async def user_panel(request: Request, session: dict = Depends(require_authentic
         "server_sensitivity": detector.server_sensitivity,
         "server_health": detector.get_health_status(),
         "admin_display_name": session.get("display_name", session.get("username")), # Use display name
+        "caps": caps,
+        "user_rank": rank,
         # Note: No system-level data like users or extension files is passed
     }
     # Render a NEW template 'userpanel.html'
@@ -738,6 +1091,7 @@ async def admin_upload_extension(request: Request, extension_file: UploadFile = 
 
 @app.post("/admin/add_trusted", dependencies=[Depends(require_authenticated)])
 async def admin_add_trusted_form(request: Request, site: str = Form(...)):
+    _require_panel_cap(request.session, "whitelist_manage")
     success = await asyncio.to_thread(detector.add_user_trusted, site)
     print(f"User {request.session.get('username')} added trusted: {site} (Success: {success})")
     # Redirect back to REFERER (admin or userpanel)
@@ -746,6 +1100,7 @@ async def admin_add_trusted_form(request: Request, site: str = Form(...)):
 
 @app.post("/admin/remove_trusted", dependencies=[Depends(require_authenticated)])
 async def admin_remove_trusted_form(request: Request, site: str = Form(...)):
+    _require_panel_cap(request.session, "whitelist_manage")
     success = await asyncio.to_thread(detector.remove_user_trusted, site)
     print(f"User {request.session.get('username')} removed trusted: {site} (Success: {success})")
     redirect_url = request.headers.get("referer", app.url_path_for("admin"))
@@ -754,6 +1109,7 @@ async def admin_remove_trusted_form(request: Request, site: str = Form(...)):
 # --- NEW --- Blacklist endpoints (also for all authenticated users)
 @app.post("/admin/add_blacklist", dependencies=[Depends(require_authenticated)])
 async def admin_add_blacklist_form(request: Request, site: str = Form(...)):
+    _require_panel_cap(request.session, "blacklist_manage")
     success = await asyncio.to_thread(detector.add_user_blacklist, site)
     print(f"User {request.session.get('username')} added blacklist: {site} (Success: {success})")
     redirect_url = request.headers.get("referer", app.url_path_for("admin"))
@@ -761,6 +1117,7 @@ async def admin_add_blacklist_form(request: Request, site: str = Form(...)):
 
 @app.post("/admin/remove_blacklist", dependencies=[Depends(require_authenticated)])
 async def admin_remove_blacklist_form(request: Request, site: str = Form(...)):
+    _require_panel_cap(request.session, "blacklist_manage")
     success = await asyncio.to_thread(detector.remove_user_blacklist, site)
     print(f"User {request.session.get('username')} removed blacklist: {site} (Success: {success})")
     redirect_url = request.headers.get("referer", app.url_path_for("admin"))
@@ -863,7 +1220,8 @@ async def admin_remove_user(request: Request, username_to_remove: str = Form(...
 async def admin_add_normal_user(request: Request,
                                 new_normal_username: str = Form(...),
                                 new_normal_password: str = Form(...),
-                                normal_display_name: str = Form(...)):
+                                normal_display_name: str = Form(...),
+                                normal_rank: str = Form(DEFAULT_RANK)):
     global normal_users_db
     if not new_normal_username or not new_normal_password or not normal_display_name:
         return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
@@ -873,7 +1231,12 @@ async def admin_add_normal_user(request: Request,
             print(f"Add normal user failed: {new_normal_username} already exists.")
         else:
             # IMPORTANT: Hash the password in production!
-            normal_users_db[new_normal_username] = {"password": new_normal_password, "display_name": normal_display_name}
+            rank = _normalize_rank(normal_rank)
+            normal_users_db[new_normal_username] = {
+                "password": new_normal_password,
+                "display_name": normal_display_name,
+                "rank": rank,
+            }
             _save_user_db(NORMAL_USERS_FILE, normal_users_db)
             print(f"Normal user added: {new_normal_username}")
     return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
@@ -895,6 +1258,25 @@ async def admin_remove_normal_user(request: Request, username_to_remove_normal: 
             print(f"Normal user removed: {username_to_remove_normal}")
         else:
             print(f"Remove normal user failed: {username_to_remove_normal} not found.")
+
+    return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
+
+@app.post("/admin/update_normal_user_rank", dependencies=[Depends(require_admin)])
+async def admin_update_normal_user_rank(
+    request: Request,
+    username_to_update: str = Form(...),
+    normal_rank: str = Form(DEFAULT_RANK),
+):
+    global normal_users_db
+    rank = _normalize_rank(normal_rank)
+    with normal_users_lock:
+        user = normal_users_db.get(username_to_update)
+        if user:
+            user["rank"] = rank
+            _save_user_db(NORMAL_USERS_FILE, normal_users_db)
+            print(f"Normal user rank updated: {username_to_update} -> {rank}")
+        else:
+            print(f"Update rank failed: {username_to_update} not found.")
 
     return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
