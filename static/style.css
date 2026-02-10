@@ -1,0 +1,325 @@
+/* static/style.css - نهایی و بسیار مدرن */
+
+/* ---------------------------------------------------------------------- */
+/* 1. Global Variables (Light Theme) */
+/* ---------------------------------------------------------------------- */
+:root {
+    --primary-color: #3f51b5; /* Deep Blue - Brand color */
+    --primary-dark: #303f9f;
+    --secondary-color: #90a4ae; /* Muted Grey */
+    --success-color: #4caf50;
+    --danger-color: #e91e63; /* Vibrant Pink/Red */
+    --warning-color: #ff9800;
+    
+    --background-color: #f7f9fc; /* Lightest Background */
+    --card-background: #ffffff;
+    --text-color: #263238; /* Dark Text */
+    --border-color: #e0e0e0;
+    --shadow-color: rgba(0,0,0,0.08);
+}
+
+/* ---------------------------------------------------------------------- */
+/* 2. Dark Mode Configuration */
+/* ---------------------------------------------------------------------- */
+@media (prefers-color-scheme: dark) {
+    :root {
+        --primary-color: #7986cb; /* Lighter Blue for visibility */
+        --primary-dark: #5c6bc0;
+        --secondary-color: #90a4ae;
+        --success-color: #81c784;
+        --danger-color: #f06292;
+        --warning-color: #ffb74d;
+        
+        --background-color: #121212; /* Very Dark Background */
+        --card-background: #1e1e1e;
+        --text-color: #e0e0e0; /* Light Text */
+        --border-color: #333333;
+        --shadow-color: rgba(0,0,0,0.4);
+    }
+}
+
+/* ---------------------------------------------------------------------- */
+/* 3. Base & Typography */
+/* ---------------------------------------------------------------------- */
+@font-face {
+    font-family: 'Vazirmatn';
+    src: url('Vazirmatn-Medium.woff2') format('woff2'); /* فرض بر این است که فونت در static موجود است */
+    font-weight: 500;
+    font-style: normal;
+}
+
+body {
+    font-family: 'Vazirmatn', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background-color: var(--background-color);
+    color: var(--text-color);
+    margin: 0;
+    padding-top: 30px;
+    direction: rtl; 
+    text-align: right;
+    transition: background-color 0.3s, color 0.3s; /* Smooth theme transition */
+}
+
+/* Ensure headings have a consistent, modern look */
+h1, h2, h3 {
+    color: var(--text-color);
+    font-weight: 700;
+}
+
+.container {
+    width: 95%;
+    max-width: 1500px; /* Slightly wider dashboard */
+    margin: 0 auto;
+}
+
+/* ---------------------------------------------------------------------- */
+/* 4. Header & Navigation */
+/* ---------------------------------------------------------------------- */
+header {
+    background-color: var(--card-background);
+    padding: 15px 40px;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 30px;
+    box-shadow: 0 4px 12px var(--shadow-color);
+    display: flex; /* For better layout control */
+    justify-content: space-between;
+    align-items: center;
+}
+nav a {
+    color: var(--primary-color);
+    text-decoration: none;
+    margin-left: 25px;
+    font-weight: 600;
+    position: relative;
+}
+/* Underline effect on hover */
+nav a::after {
+    content: '';
+    position: absolute;
+    width: 0;
+    height: 3px;
+    bottom: -8px;
+    right: 0; /* Right for RTL */
+    background-color: var(--danger-color);
+    transition: width 0.3s ease-out;
+}
+nav a:hover::after {
+    width: 100%;
+}
+
+/* ---------------------------------------------------------------------- */
+/* 5. Cards & Layout */
+/* ---------------------------------------------------------------------- */
+.card {
+    background-color: var(--card-background);
+    border: 1px solid var(--border-color); /* Added border for definition */
+    border-radius: 16px; /* Super rounded corners */
+    padding: 30px;
+    margin-bottom: 30px;
+    box-shadow: 0 10px 30px var(--shadow-color);
+    transition: all 0.3s ease;
+}
+
+.card:hover {
+    transform: translateY(-5px); /* Stronger lift effect */
+    box-shadow: 0 15px 40px var(--shadow-color); 
+}
+
+.card h2 {
+    color: var(--primary-color);
+    border-bottom: 2px solid var(--border-color);
+    padding-bottom: 15px;
+    margin-top: 0;
+    font-size: 1.6em;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+/* ---------------------------------------------------------------------- */
+/* 6. Forms & Controls */
+/* ---------------------------------------------------------------------- */
+input[type="text"], 
+input[type="password"], 
+input[type="file"], /* Added file input styling */
+input[type="range"] {
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+    background-color: var(--background-color);
+    color: var(--text-color);
+    margin-bottom: 15px;
+    width: 100%;
+    box-sizing: border-box;
+    font-size: 1em;
+    transition: border-color 0.3s, box-shadow 0.3s;
+}
+
+input[type="text"]:focus, 
+input[type="password"]:focus, 
+input[type="file"]:focus {
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba(63, 81, 181, 0.3); /* Focus Ring */
+    outline: none;
+}
+
+button, .button {
+    padding: 12px 25px;
+    border-radius: 10px;
+    background-color: var(--primary-color);
+    color: white;
+    cursor: pointer;
+    border: none;
+    transition: background-color 0.2s, transform 0.1s, box-shadow 0.2s;
+    width: auto;
+    font-weight: 600;
+    margin-left: 10px;
+    font-size: 1em;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+button:hover, .button:hover {
+    background-color: var(--primary-dark);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 15px rgba(0,0,0,0.15);
+}
+button:active, .button:active {
+    transform: translateY(0);
+    box-shadow: none;
+}
+
+/* Specific Button Styles */
+.btn-danger { background-color: var(--danger-color); }
+.btn-danger:hover { background-color: #c51152; }
+.btn-success { background-color: var(--success-color); }
+.btn-success:hover { background-color: #388e3c; }
+
+/* ---------------------------------------------------------------------- */
+/* 7. Table Styling (Data Grid) */
+/* ---------------------------------------------------------------------- */
+table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    margin-top: 15px;
+    overflow: hidden;
+    border-radius: 12px; /* Consistent with cards */
+    box-shadow: 0 4px 10px var(--shadow-color);
+}
+th, td {
+    padding: 15px 20px;
+    border-bottom: 1px solid var(--border-color);
+    text-align: right;
+}
+th {
+    background-color: var(--primary-dark); /* Darker header */
+    color: white;
+    font-weight: 700;
+    border-bottom: 2px solid var(--primary-color);
+    text-transform: uppercase;
+    font-size: 0.9em;
+}
+tr:nth-child(even) {
+    background-color: rgba(0, 0, 0, 0.01);
+}
+tr:hover {
+    background-color: rgba(0, 0, 0, 0.03); /* Hover effect */
+    transition: background-color 0.15s;
+}
+tr:last-child td {
+    border-bottom: none;
+}
+td code {
+    background: rgba(0, 0, 0, 0.05);
+    padding: 2px 5px;
+    border-radius: 4px;
+    font-size: 0.9em;
+    direction: ltr;
+}
+
+/* ---------------------------------------------------------------------- */
+/* 8. Utility & Layout */
+/* ---------------------------------------------------------------------- */
+.error-message {
+    color: var(--danger-color);
+    margin-bottom: 20px;
+    padding: 15px;
+    background-color: rgba(233, 30, 99, 0.1); /* Lighter background using danger color opacity */
+    border: 1px solid var(--danger-color);
+    border-radius: 10px;
+    font-weight: 600;
+}
+.admin-grid {
+    display: grid;
+    grid-template-columns: 1fr 2fr; /* Optimized column ratio */
+    gap: 30px;
+}
+.trusted-list {
+    list-style: none;
+    padding: 0;
+    max-height: 400px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+    padding: 15px;
+    border-radius: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.trusted-list li {
+    background: var(--background-color);
+    padding: 6px 10px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    font-size: 0.9em;
+    border-right: 4px solid var(--success-color);
+}
+
+/* Conditional Colors */
+.phishing-high {
+    color: var(--danger-color);
+    font-weight: 900;
+}
+
+.phishing-low {
+    color: var(--success-color);
+    font-weight: 700;
+}
+
+/* ---------------------------------------------------------------------- */
+/* 9. Responsiveness */
+/* ---------------------------------------------------------------------- */
+@media (max-width: 1200px) {
+    .admin-grid {
+        grid-template-columns: 1fr;
+    }
+}
+@media (max-width: 600px) {
+    body {
+        padding-top: 15px;
+    }
+    header {
+        padding: 15px 20px;
+        flex-direction: column;
+        gap: 10px;
+    }
+    nav a {
+        margin: 0 10px;
+    }
+    .card {
+        padding: 20px;
+    }
+    input[type="text"], input[type="password"], input[type="file"], button, .button {
+        /* Ensure inputs and buttons span full width on small screens */
+        width: 100%;
+        margin-left: 0;
+        margin-bottom: 10px;
+    }
+    /* Fix table overflow on tiny screens */
+    .card:has(table) {
+        overflow-x: auto;
+    }
+}
