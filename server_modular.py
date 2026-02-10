@@ -13,6 +13,7 @@ import collections
 import asyncio
 import traceback
 from typing import List, Dict, Any, Set, Optional
+from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi import FastAPI, HTTPException, Request, Form, Depends, status, UploadFile, File
 # --- NEW --- Import FileResponse for backups
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
@@ -63,20 +64,14 @@ def data_file(filename: str) -> str:
     except OSError:
         return filename
 
-USER_TRUSTED_FILE = data_file("user_trusted.json")
-# --- NEW --- Blacklist file
-USER_BLACKLIST_FILE = data_file("user_blacklist.json")
-# --- NEW --- Admin users file
-ADMIN_USERS_FILE = data_file("admin_users.json")
-# --- NEW --- Normal users file
-NORMAL_USERS_FILE = data_file("normal_users.json")
 
 
 SECRET_KEY = os.environ.get("PHISH_SECRET_KEY", "your-default-very-secret-key-please-change-it")
+MONGO_URI = os.environ.get("PHISH_MONGO_URI", "").strip()
+MONGO_DB_NAME = os.environ.get("PHISH_DB_NAME", "phishguard")
 # --- REMOVED --- Single admin user/pass from env vars - now managed in file
 # ADMIN_USER = os.environ.get("PHISH_ADMIN_USER", "admin")
 # ADMIN_PASS = os.environ.get("PHISH_ADMIN_PASS", "12345")
-SERVER_SENSITIVITY_FILE = data_file("server_sensitivity.json")
 
 RANKS = ["basic", "plus", "pro"]
 DEFAULT_RANK = "basic"
@@ -335,6 +330,165 @@ async def _redirect_chain(url: str, max_hops: int = 8) -> List[str]:
     except Exception:
         return []
 
+class MongoStore:
+    def __init__(self, uri: str, db_name: str):
+        self.client = AsyncIOMotorClient(uri)
+        self.db = self.client[db_name]
+        self.admin_users = self.db["admin_users"]
+        self.normal_users = self.db["normal_users"]
+        self.settings = self.db["settings"]
+
+    async def ensure_defaults(self):
+        if await self.admin_users.count_documents({}) == 0:
+            await self.admin_users.insert_one({
+                "_id": "admin",
+                "password": "12345",
+                "display_name": "Default Admin",
+            })
+        if await self.normal_users.count_documents({}) == 0:
+            await self.normal_users.insert_one({
+                "_id": "user",
+                "password": "123",
+                "display_name": "Normal User",
+                "rank": DEFAULT_RANK,
+            })
+
+        await self.settings.update_one(
+            {"_id": "server_sensitivity"},
+            {"$setOnInsert": {"value": 90}},
+            upsert=True,
+        )
+        await self.settings.update_one(
+            {"_id": "user_trusted"},
+            {"$setOnInsert": {"value": []}},
+            upsert=True,
+        )
+        await self.settings.update_one(
+            {"_id": "user_blacklist"},
+            {"$setOnInsert": {"value": []}},
+            upsert=True,
+        )
+
+        await self.normalize_normal_user_ranks()
+
+    async def normalize_normal_user_ranks(self):
+        cursor = self.normal_users.find({})
+        async for doc in cursor:
+            current = doc.get("rank")
+            normalized = _normalize_rank(current)
+            if current != normalized:
+                await self.normal_users.update_one(
+                    {"_id": doc["_id"]},
+                    {"$set": {"rank": normalized}},
+                )
+
+    async def get_admin_user(self, username: str) -> Optional[Dict[str, Any]]:
+        return await self.admin_users.find_one({"_id": username})
+
+    async def get_normal_user(self, username: str) -> Optional[Dict[str, Any]]:
+        return await self.normal_users.find_one({"_id": username})
+
+    async def get_all_admin_users(self) -> Dict[str, Dict[str, Any]]:
+        users = {}
+        async for doc in self.admin_users.find({}):
+            users[doc["_id"]] = {
+                "password": doc.get("password", ""),
+                "display_name": doc.get("display_name", doc["_id"]),
+            }
+        return users
+
+    async def get_all_normal_users(self) -> Dict[str, Dict[str, Any]]:
+        users = {}
+        async for doc in self.normal_users.find({}):
+            users[doc["_id"]] = {
+                "password": doc.get("password", ""),
+                "display_name": doc.get("display_name", doc["_id"]),
+                "rank": _normalize_rank(doc.get("rank")),
+            }
+        return users
+
+    async def add_admin_user(self, username: str, password: str, display_name: str) -> bool:
+        existing = await self.get_admin_user(username)
+        if existing:
+            return False
+        await self.admin_users.insert_one({
+            "_id": username,
+            "password": password,
+            "display_name": display_name,
+        })
+        return True
+
+    async def remove_admin_user(self, username: str) -> bool:
+        result = await self.admin_users.delete_one({"_id": username})
+        return result.deleted_count > 0
+
+    async def admin_count(self) -> int:
+        return await self.admin_users.count_documents({})
+
+    async def add_normal_user(self, username: str, password: str, display_name: str, rank: str) -> bool:
+        existing = await self.get_normal_user(username)
+        if existing:
+            return False
+        await self.normal_users.insert_one({
+            "_id": username,
+            "password": password,
+            "display_name": display_name,
+            "rank": _normalize_rank(rank),
+        })
+        return True
+
+    async def remove_normal_user(self, username: str) -> bool:
+        result = await self.normal_users.delete_one({"_id": username})
+        return result.deleted_count > 0
+
+    async def update_normal_user_rank(self, username: str, rank: str) -> bool:
+        result = await self.normal_users.update_one(
+            {"_id": username},
+            {"$set": {"rank": _normalize_rank(rank)}},
+        )
+        return result.matched_count > 0
+
+    async def get_setting(self, key: str, default: Any = None) -> Any:
+        doc = await self.settings.find_one({"_id": key})
+        if not doc:
+            return default
+        return doc.get("value", default)
+
+    async def set_setting(self, key: str, value: Any):
+        await self.settings.update_one(
+            {"_id": key},
+            {"$set": {"value": value}},
+            upsert=True,
+        )
+
+    async def get_list(self, key: str) -> List[str]:
+        value = await self.get_setting(key, [])
+        if isinstance(value, list):
+            return value
+        return []
+
+    async def set_list(self, key: str, values: List[str]):
+        await self.set_setting(key, values)
+
+    async def get_extension_filename(self) -> Optional[str]:
+        return await self.get_setting("extension_filename", None)
+
+    async def set_extension_filename(self, filename: Optional[str]):
+        await self.set_setting("extension_filename", filename)
+
+    async def get_server_sensitivity(self, default: int) -> int:
+        value = await self.get_setting("server_sensitivity", default)
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    async def set_server_sensitivity(self, value: int):
+        await self.set_setting("server_sensitivity", int(value))
+
+
+mongo_store: Optional[MongoStore] = None
+
 app = FastAPI(title="Local Phishing Detector API")
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
@@ -349,65 +503,7 @@ app.add_middleware(
 
 templates = Jinja2Templates(directory="templates")
 
-# --- NEW --- Helper functions for user databases ---
-def _load_user_db(file_path: str, default_user: str, default_pass: str, default_name: str, default_profile: Optional[Dict[str, str]] = None) -> Dict[str, Dict[str, str]]:
-    """Loads a user database from a JSON file."""
-    if not os.path.exists(file_path):
-        # Create default admin if file doesn't exist
-        # IMPORTANT: In production, hash the password!
-        # hashed_pass = hashlib.sha256(default_pass.encode()).hexdigest()
-        profile = default_profile.copy() if default_profile else {}
-        default_users = {
-            default_user: {"password": default_pass, "display_name": default_name, **profile}
-        }
-        _save_user_db(file_path, default_users)
-        return default_users
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error loading user file {file_path}: {e}. Using default.")
-        profile = default_profile.copy() if default_profile else {}
-        return {default_user: {"password": default_pass, "display_name": default_name, **profile}}
-
-def _save_user_db(file_path: str, users: Dict[str, Dict[str, str]]):
-    """Saves a user database to a JSON file."""
-    try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(users, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Error saving user file {file_path}: {e}")
-
-# Load admin users at startup
-admin_users_db = _load_user_db(ADMIN_USERS_FILE, "admin", "12345", "Default Admin")
-admin_users_lock = threading.Lock() # Lock for modifying admin users
-
-# --- NEW --- Load normal users at startup
-normal_users_db = _load_user_db(
-    NORMAL_USERS_FILE,
-    "user",
-    "123",
-    "Normal User",
-    default_profile={"rank": DEFAULT_RANK},
-)
-normal_users_lock = threading.Lock() # Lock for modifying normal users
-
-def _ensure_normal_user_ranks():
-    global normal_users_db
-    updated = False
-    for username, data in normal_users_db.items():
-        if not isinstance(data, dict):
-            normal_users_db[username] = {"password": "", "display_name": username, "rank": DEFAULT_RANK}
-            updated = True
-            continue
-        normalized_rank = _normalize_rank(data.get("rank"))
-        if data.get("rank") != normalized_rank:
-            data["rank"] = normalized_rank
-            updated = True
-    if updated:
-        _save_user_db(NORMAL_USERS_FILE, normal_users_db)
-
-_ensure_normal_user_ranks()
+# --- User data is stored in MongoDB (see MongoStore) ---
 
 
 # --- MLPhishingModel Class (Unchanged) ---
@@ -461,11 +557,7 @@ class MLPhishingModel:
 class PhishDetector:
 
     TRUSTED_CACHE = TRUSTED_GLOBAL_CACHE
-    USER_TRUSTED_FILE = USER_TRUSTED_FILE
-    # --- NEW --- Blacklist file constant
-    USER_BLACKLIST_FILE = USER_BLACKLIST_FILE
     REPO_RAW_URL = "https://s27.uupload.ir/files/09171258914/cloudflare-radar_top-1000000-domains_20251103-20251110.csv" # Or your preferred source
-    EXTENSION_FILE_INFO = "extension_file_info.json"
     EXTENSION_UPLOAD_DIR = "static/extension_files"
 
     def __init__(self):
@@ -483,9 +575,10 @@ class PhishDetector:
         self.reports: List[Dict[str, Any]] = []
         self.scan_history_lock = threading.Lock()
         self.scan_history: List[Dict[str, Any]] = []
-        self.server_sensitivity = self._load_sensitivity(default=90) # Default sensitivity 90
+        self.server_sensitivity = 90 # Default sensitivity, overridden by Mongo
 
         self.extension_filename: Optional[str] = None
+        self.store: Optional[MongoStore] = None
         os.makedirs(self.EXTENSION_UPLOAD_DIR, exist_ok=True)
 
         self.ml_model = MLPhishingModel()
@@ -527,32 +620,6 @@ class PhishDetector:
         except Exception as e: print(f"[_load_json_set] error loading {path}: {e}"); return set()
         return set()
 
-    def _load_sensitivity(self, default: int) -> int:
-        try:
-            if os.path.exists(SERVER_SENSITIVITY_FILE):
-                with open(SERVER_SENSITIVITY_FILE, 'r') as f: return int(json.load(f).get("sensitivity", default))
-        except Exception: pass
-        return default
-
-    def _save_sensitivity(self):
-        # Assumes sensitivity_lock is held by caller (set_server_sensitivity)
-        try:
-            with open(SERVER_SENSITIVITY_FILE, 'w') as f: json.dump({"sensitivity": self.server_sensitivity}, f)
-        except Exception as e: print(f"Error saving sensitivity: {e}")
-
-    def _load_extension_file_info(self) -> Optional[str]:
-        try:
-            if os.path.exists(self.EXTENSION_FILE_INFO):
-                with open(self.EXTENSION_FILE_INFO, 'r') as f: return json.load(f).get("filename")
-        except Exception: return None
-        return None
-
-    def _save_extension_file_info(self, filename: str):
-        self.extension_filename = filename
-        try:
-            with open(self.EXTENSION_FILE_INFO, 'w') as f: json.dump({"filename": filename}, f)
-        except Exception as e: print(f"Error saving extension filename: {e}")
-
     def _cleanup_old_extension_files(self, current_filename: str):
         try:
             for filename in os.listdir(self.EXTENSION_UPLOAD_DIR):
@@ -561,18 +628,31 @@ class PhishDetector:
                     if os.path.isfile(file_path): os.remove(file_path); print(f"Cleaned up: {filename}")
         except Exception as e: print(f"Error during file cleanup: {e}")
 
+    async def set_extension_filename(self, filename: Optional[str]):
+        self.extension_filename = filename
+        if self.store:
+            await self.store.set_extension_filename(filename)
+
     def get_extension_path(self) -> Optional[str]:
         if self.extension_filename: return f"/static/extension_files/{self.extension_filename}"
         return None
 
     # --- Data Loading (MODIFIED) ---
     def _load_data_on_startup(self):
-        self.user_trusted = self._load_json_set(self.USER_TRUSTED_FILE)
-        # --- NEW --- Load blacklist
-        self.user_blacklist = self._load_json_set(self.USER_BLACKLIST_FILE)
+        self.user_trusted = set()
+        self.user_blacklist = set()
         self.trusted_global = self._load_json_set(self.TRUSTED_CACHE)
-        self.extension_filename = self._load_extension_file_info()
-        print(f"Loaded {len(self.trusted_global)} global, {len(self.user_trusted)} trusted, {len(self.user_blacklist)} blacklisted domains.")
+        print(f"Loaded {len(self.trusted_global)} global domains. User lists will load from MongoDB.")
+
+    async def load_from_store(self, store: MongoStore):
+        self.store = store
+        trusted = await store.get_list("user_trusted")
+        blacklist = await store.get_list("user_blacklist")
+        self.user_trusted = set(self._normalize_host(d) for d in trusted if self._normalize_host(d))
+        self.user_blacklist = set(self._normalize_host(d) for d in blacklist if self._normalize_host(d))
+        self.extension_filename = await store.get_extension_filename()
+        self.server_sensitivity = await store.get_server_sensitivity(self.server_sensitivity)
+        print(f"Mongo load: {len(self.user_trusted)} trusted, {len(self.user_blacklist)} blacklisted domains. Sensitivity: {self.server_sensitivity}%")
 
     async def _refresh_trusted_global(self):
         print(f"Refreshing global trusted list from {self.REPO_RAW_URL} (Async)...")
@@ -609,47 +689,59 @@ class PhishDetector:
         while True: await asyncio.sleep(6 * 60 * 60); await self._refresh_trusted_global() # Refresh every 6 hours
 
     # --- Public Data Methods (MODIFIED, added blacklist methods) ---
-    def add_user_trusted(self, host: str) -> bool:
-        host = self._normalize_host(host);
-        if not host: return False
+    async def add_user_trusted(self, host: str) -> bool:
+        host = self._normalize_host(host)
+        if not host:
+            return False
+        updated = False
         with self.list_lock:
             if host not in self.user_trusted:
                 self.user_trusted.add(host)
-                self._save_json_set(self.USER_TRUSTED_FILE, self.user_trusted)
-                return True
-        return False
+                updated = True
+        if updated and self.store:
+            await self.store.set_list("user_trusted", sorted(self.user_trusted))
+        return updated
 
-    def remove_user_trusted(self, host: str) -> bool:
-        host = self._normalize_host(host);
-        if not host: return False
+    async def remove_user_trusted(self, host: str) -> bool:
+        host = self._normalize_host(host)
+        if not host:
+            return False
+        updated = False
         with self.list_lock:
             if host in self.user_trusted:
                 self.user_trusted.remove(host)
-                self._save_json_set(self.USER_TRUSTED_FILE, self.user_trusted)
-                return True
-        return False
+                updated = True
+        if updated and self.store:
+            await self.store.set_list("user_trusted", sorted(self.user_trusted))
+        return updated
 
     # --- NEW --- Blacklist add method
-    def add_user_blacklist(self, host: str) -> bool:
-        host = self._normalize_host(host);
-        if not host: return False
+    async def add_user_blacklist(self, host: str) -> bool:
+        host = self._normalize_host(host)
+        if not host:
+            return False
+        updated = False
         with self.list_lock:
             if host not in self.user_blacklist:
                 self.user_blacklist.add(host)
-                self._save_json_set(self.USER_BLACKLIST_FILE, self.user_blacklist)
-                return True
-        return False
+                updated = True
+        if updated and self.store:
+            await self.store.set_list("user_blacklist", sorted(self.user_blacklist))
+        return updated
 
     # --- NEW --- Blacklist remove method
-    def remove_user_blacklist(self, host: str) -> bool:
-        host = self._normalize_host(host);
-        if not host: return False
+    async def remove_user_blacklist(self, host: str) -> bool:
+        host = self._normalize_host(host)
+        if not host:
+            return False
+        updated = False
         with self.list_lock:
             if host in self.user_blacklist:
                 self.user_blacklist.remove(host)
-                self._save_json_set(self.USER_BLACKLIST_FILE, self.user_blacklist)
-                return True
-        return False
+                updated = True
+        if updated and self.store:
+            await self.store.set_list("user_blacklist", sorted(self.user_blacklist))
+        return updated
 
     # --- MODIFIED --- Get data includes blacklist
     def get_list_data(self):
@@ -682,10 +774,11 @@ class PhishDetector:
             self.reports = []
             print("All reports purged by admin.")
 
-    def set_server_sensitivity(self, sensitivity: int):
+    async def set_server_sensitivity(self, sensitivity: int):
         with self.sensitivity_lock:
             self.server_sensitivity = max(50, min(100, sensitivity))
-            self._save_sensitivity() # Save immediately
+        if self.store:
+            await self.store.set_server_sensitivity(self.server_sensitivity)
 
     def get_health_status(self) -> Dict[str, Any]:
         with self.health_lock:
@@ -818,6 +911,12 @@ detector = PhishDetector()
 
 @app.on_event("startup")
 async def startup_event():
+    global mongo_store
+    if not MONGO_URI:
+        raise RuntimeError("PHISH_MONGO_URI is required for MongoDB storage.")
+    mongo_store = MongoStore(MONGO_URI, MONGO_DB_NAME)
+    await mongo_store.ensure_defaults()
+    await detector.load_from_store(mongo_store)
     print("FastAPI Startup: Launching async trusted list refresher.")
     asyncio.create_task(detector._trusted_refresher_worker())
 
@@ -1025,10 +1124,13 @@ async def login(request: Request):
 
 @app.post("/login")
 async def login_post(request: Request, username: str = Form(...), password: str = Form(...)):
-    global admin_users_db, normal_users_db
+    global mongo_store
     
+    if not mongo_store:
+        return templates.TemplateResponse("login.html", {"request": request, "error": "Database not configured."}, status_code=500)
+
     # 1. Check Admins
-    admin_user_data = admin_users_db.get(username)
+    admin_user_data = await mongo_store.get_admin_user(username)
     if admin_user_data:
         # User is in the admin list. Check password.
         if admin_user_data.get("password") == password: # Simple comparison for now
@@ -1048,7 +1150,7 @@ async def login_post(request: Request, username: str = Form(...), password: str 
 
     # 2. Check Normal Users
     # Only run this check if the user was NOT found in the admin list
-    normal_user_data = normal_users_db.get(username)
+    normal_user_data = await mongo_store.get_normal_user(username)
     if normal_user_data and normal_user_data.get("password") == password: # Simple comparison for now
         request.session["authenticated"] = True
         request.session["is_admin"] = False
@@ -1066,7 +1168,7 @@ async def login_post(request: Request, username: str = Form(...), password: str 
 # --- NEW --- API Login for Extension
 @app.post("/api/extension_login")
 async def api_extension_login(request: Request):
-    global normal_users_db, admin_users_db
+    global mongo_store
     try:
         data = await request.json()
         username = data.get("username")
@@ -1074,8 +1176,11 @@ async def api_extension_login(request: Request):
     except Exception:
         return JSONResponse({"success": False, "error": "Invalid request"}, status_code=400)
 
+    if not mongo_store:
+        return JSONResponse({"success": False, "error": "Database not configured"}, status_code=500)
+
     # Check normal users first
-    user_data = normal_users_db.get(username)
+    user_data = await mongo_store.get_normal_user(username)
     if user_data and user_data.get("password") == password:
         rank = _normalize_rank(user_data.get("rank"))
         caps = RANK_CAPS[rank]
@@ -1088,7 +1193,7 @@ async def api_extension_login(request: Request):
         })
         
     # Optional: Allow admins to log in to extension as well
-    admin_data = admin_users_db.get(username)
+    admin_data = await mongo_store.get_admin_user(username)
     if admin_data and admin_data.get("password") == password:
          return JSONResponse({
              "success": True,
@@ -1113,7 +1218,13 @@ async def logout(request: Request):
 async def admin(request: Request, admin_username: str = Depends(require_admin)):
     list_data = detector.get_list_data()
     reports = detector.get_reports()
-    global admin_users_db, normal_users_db # Access user dbs
+    global mongo_store
+
+    if not mongo_store:
+        raise HTTPException(status_code=500, detail="Database not configured.")
+
+    all_admin_users = await mongo_store.get_all_admin_users()
+    all_normal_users = await mongo_store.get_all_normal_users()
 
     context = {
         "request": request,
@@ -1125,8 +1236,8 @@ async def admin(request: Request, admin_username: str = Depends(require_admin)):
         "current_extension_file": detector.extension_filename,
         "server_health": detector.get_health_status(),
         "admin_display_name": request.session.get("display_name", admin_username), # --- NEW --- Welcome message name
-        "all_admin_users": admin_users_db, # --- NEW --- Pass users for management
-        "all_normal_users": normal_users_db # --- NEW --- Pass normal users
+        "all_admin_users": all_admin_users, # --- NEW --- Pass users for management
+        "all_normal_users": all_normal_users # --- NEW --- Pass normal users
     }
     return templates.TemplateResponse("admin.html", context)
 
@@ -1170,9 +1281,9 @@ async def admin_upload_extension(request: Request, extension_file: UploadFile = 
         contents = await extension_file.read()
         def _save_file_and_cleanup():
             with open(file_path, "wb") as buffer: buffer.write(contents)
-            detector._save_extension_file_info(safe_filename)
             detector._cleanup_old_extension_files(safe_filename)
         await asyncio.to_thread(_save_file_and_cleanup)
+        await detector.set_extension_filename(safe_filename)
         print(f"Extension file uploaded: {safe_filename}")
     except Exception as e: print(f"File upload failed: {e}")
     return RedirectResponse(url=app.url_path_for("admin"), status_code=status.HTTP_302_FOUND)
@@ -1185,7 +1296,7 @@ async def admin_upload_extension(request: Request, extension_file: UploadFile = 
 @app.post("/admin/add_trusted", dependencies=[Depends(require_authenticated)])
 async def admin_add_trusted_form(request: Request, site: str = Form(...)):
     _require_panel_cap(request.session, "whitelist_manage")
-    success = await asyncio.to_thread(detector.add_user_trusted, site)
+    success = await detector.add_user_trusted(site)
     print(f"User {request.session.get('username')} added trusted: {site} (Success: {success})")
     # Redirect back to REFERER (admin or userpanel)
     redirect_url = request.headers.get("referer", app.url_path_for("admin"))
@@ -1194,7 +1305,7 @@ async def admin_add_trusted_form(request: Request, site: str = Form(...)):
 @app.post("/admin/remove_trusted", dependencies=[Depends(require_authenticated)])
 async def admin_remove_trusted_form(request: Request, site: str = Form(...)):
     _require_panel_cap(request.session, "whitelist_manage")
-    success = await asyncio.to_thread(detector.remove_user_trusted, site)
+    success = await detector.remove_user_trusted(site)
     print(f"User {request.session.get('username')} removed trusted: {site} (Success: {success})")
     redirect_url = request.headers.get("referer", app.url_path_for("admin"))
     return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
@@ -1203,7 +1314,7 @@ async def admin_remove_trusted_form(request: Request, site: str = Form(...)):
 @app.post("/admin/add_blacklist", dependencies=[Depends(require_authenticated)])
 async def admin_add_blacklist_form(request: Request, site: str = Form(...)):
     _require_panel_cap(request.session, "blacklist_manage")
-    success = await asyncio.to_thread(detector.add_user_blacklist, site)
+    success = await detector.add_user_blacklist(site)
     print(f"User {request.session.get('username')} added blacklist: {site} (Success: {success})")
     redirect_url = request.headers.get("referer", app.url_path_for("admin"))
     return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
@@ -1211,7 +1322,7 @@ async def admin_add_blacklist_form(request: Request, site: str = Form(...)):
 @app.post("/admin/remove_blacklist", dependencies=[Depends(require_authenticated)])
 async def admin_remove_blacklist_form(request: Request, site: str = Form(...)):
     _require_panel_cap(request.session, "blacklist_manage")
-    success = await asyncio.to_thread(detector.remove_user_blacklist, site)
+    success = await detector.remove_user_blacklist(site)
     print(f"User {request.session.get('username')} removed blacklist: {site} (Success: {success})")
     redirect_url = request.headers.get("referer", app.url_path_for("admin"))
     return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
@@ -1220,7 +1331,7 @@ async def admin_remove_blacklist_form(request: Request, site: str = Form(...)):
 
 @app.post("/admin/set_sensitivity", dependencies=[Depends(require_admin)])
 async def admin_set_sensitivity(request: Request, sensitivity: int = Form(...)):
-    await asyncio.to_thread(detector.set_server_sensitivity, sensitivity)
+    await detector.set_server_sensitivity(sensitivity)
     return RedirectResponse(url=app.url_path_for("admin"), status_code=status.HTTP_302_FOUND)
 
 # --- NEW --- Manual Analyze endpoint (ADMIN ONLY)
@@ -1239,11 +1350,10 @@ async def admin_analyze_url(request: Request):
 # --- NEW --- Backup endpoints (ADMIN ONLY)
 @app.get("/admin/backup_whitelist", dependencies=[Depends(require_admin)])
 async def admin_backup_whitelist():
-    filepath = detector.USER_TRUSTED_FILE
-    if os.path.exists(filepath):
-        return FileResponse(filepath, media_type='application/json', filename='user_trusted_backup.json')
-    else:
-        return JSONResponse({"error": "Whitelist file not found"}, status_code=404)
+    if not mongo_store:
+        return JSONResponse({"error": "Database not configured"}, status_code=500)
+    trusted = await mongo_store.get_list("user_trusted")
+    return JSONResponse(content=trusted, headers={"Content-Disposition": "attachment; filename=user_trusted_backup.json"})
 
 @app.get("/admin/backup_logs", dependencies=[Depends(require_admin)])
 async def admin_backup_logs():
@@ -1266,44 +1376,40 @@ async def admin_add_user(request: Request,
                          new_username: str = Form(...),
                          new_password: str = Form(...),
                          display_name: str = Form(...)):
-    global admin_users_db
     if not new_username or not new_password or not display_name:
         # Add error message to session maybe
         return RedirectResponse(url=app.url_path_for("admin"), status_code=status.HTTP_302_FOUND)
 
-    with admin_users_lock:
-        if new_username in admin_users_db:
-            # Username already exists, handle error (e.g., flash message)
-            print(f"Add admin user failed: {new_username} already exists.")
-        else:
-            # IMPORTANT: Hash the password in production!
-            # hashed_pass = hashlib.sha256(new_password.encode()).hexdigest()
-            admin_users_db[new_username] = {"password": new_password, "display_name": display_name}
-            _save_user_db(ADMIN_USERS_FILE, admin_users_db)
-            print(f"Admin user added: {new_username}")
+    if not mongo_store:
+        return RedirectResponse(url=app.url_path_for("admin"), status_code=status.HTTP_302_FOUND)
+
+    added = await mongo_store.add_admin_user(new_username, new_password, display_name)
+    if not added:
+        print(f"Add admin user failed: {new_username} already exists.")
+    else:
+        print(f"Admin user added: {new_username}")
     return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND) # Redirect back to system tab
 
 @app.post("/admin/remove_user", dependencies=[Depends(require_admin)])
 async def admin_remove_user(request: Request, username_to_remove: str = Form(...)):
-    global admin_users_db
     current_user = request.session.get("username")
 
     if username_to_remove == current_user:
         # Cannot remove self
         print("Remove admin user failed: Cannot remove self.")
         return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
-    if len(admin_users_db) <= 1:
+    if not mongo_store:
+        return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
+    if await mongo_store.admin_count() <= 1:
         # Cannot remove the last admin
         print("Remove admin user failed: Cannot remove the last admin.")
         return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
-    with admin_users_lock:
-        if username_to_remove in admin_users_db:
-            del admin_users_db[username_to_remove]
-            _save_user_db(ADMIN_USERS_FILE, admin_users_db)
-            print(f"Admin user removed: {username_to_remove}")
-        else:
-            print(f"Remove admin user failed: {username_to_remove} not found.")
+    removed = await mongo_store.remove_admin_user(username_to_remove)
+    if removed:
+        print(f"Admin user removed: {username_to_remove}")
+    else:
+        print(f"Remove admin user failed: {username_to_remove} not found.")
 
     return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
@@ -1315,42 +1421,30 @@ async def admin_add_normal_user(request: Request,
                                 new_normal_password: str = Form(...),
                                 normal_display_name: str = Form(...),
                                 normal_rank: str = Form(DEFAULT_RANK)):
-    global normal_users_db
     if not new_normal_username or not new_normal_password or not normal_display_name:
         return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
-    with normal_users_lock:
-        if new_normal_username in normal_users_db:
-            print(f"Add normal user failed: {new_normal_username} already exists.")
-        else:
-            # IMPORTANT: Hash the password in production!
-            rank = _normalize_rank(normal_rank)
-            normal_users_db[new_normal_username] = {
-                "password": new_normal_password,
-                "display_name": normal_display_name,
-                "rank": rank,
-            }
-            _save_user_db(NORMAL_USERS_FILE, normal_users_db)
-            print(f"Normal user added: {new_normal_username}")
+    if not mongo_store:
+        return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
+
+    added = await mongo_store.add_normal_user(new_normal_username, new_normal_password, normal_display_name, normal_rank)
+    if not added:
+        print(f"Add normal user failed: {new_normal_username} already exists.")
+    else:
+        print(f"Normal user added: {new_normal_username}")
     return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
 @app.post("/admin/remove_normal_user", dependencies=[Depends(require_admin)])
 async def admin_remove_normal_user(request: Request, username_to_remove_normal: str = Form(...)):
-    global normal_users_db
-
     # No self-check needed as admin is not in this list
-    if len(normal_users_db) <= 1:
-        # Optional: prevent removing last normal user
-        print("Remove normal user failed: Cannot remove the last user (optional check).")
-        # return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
+    if not mongo_store:
+        return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
-    with normal_users_lock:
-        if username_to_remove_normal in normal_users_db:
-            del normal_users_db[username_to_remove_normal]
-            _save_user_db(NORMAL_USERS_FILE, normal_users_db)
-            print(f"Normal user removed: {username_to_remove_normal}")
-        else:
-            print(f"Remove normal user failed: {username_to_remove_normal} not found.")
+    removed = await mongo_store.remove_normal_user(username_to_remove_normal)
+    if removed:
+        print(f"Normal user removed: {username_to_remove_normal}")
+    else:
+        print(f"Remove normal user failed: {username_to_remove_normal} not found.")
 
     return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
@@ -1360,16 +1454,14 @@ async def admin_update_normal_user_rank(
     username_to_update: str = Form(...),
     normal_rank: str = Form(DEFAULT_RANK),
 ):
-    global normal_users_db
-    rank = _normalize_rank(normal_rank)
-    with normal_users_lock:
-        user = normal_users_db.get(username_to_update)
-        if user:
-            user["rank"] = rank
-            _save_user_db(NORMAL_USERS_FILE, normal_users_db)
-            print(f"Normal user rank updated: {username_to_update} -> {rank}")
-        else:
-            print(f"Update rank failed: {username_to_update} not found.")
+    if not mongo_store:
+        return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
+
+    updated = await mongo_store.update_normal_user_rank(username_to_update, normal_rank)
+    if updated:
+        print(f"Normal user rank updated: {username_to_update} -> {_normalize_rank(normal_rank)}")
+    else:
+        print(f"Update rank failed: {username_to_update} not found.")
 
     return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
@@ -1384,12 +1476,10 @@ async def admin_shutdown():
 
 if __name__ == "__main__":
     # Ensure necessary files exist
-    for f in [TRUSTED_GLOBAL_CACHE, USER_TRUSTED_FILE, USER_BLACKLIST_FILE, ADMIN_USERS_FILE, NORMAL_USERS_FILE]:
-        if not os.path.exists(f):
-            print(f"Creating empty file: {f}")
-            with open(f, 'w') as fp:
-                if f == ADMIN_USERS_FILE or f == NORMAL_USERS_FILE: json.dump({}, fp) 
-                else: json.dump([], fp) 
+    if not os.path.exists(TRUSTED_GLOBAL_CACHE):
+        print(f"Creating empty file: {TRUSTED_GLOBAL_CACHE}")
+        with open(TRUSTED_GLOBAL_CACHE, 'w') as fp:
+            json.dump([], fp)
 
     host = os.environ.get("PHISH_HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8000"))
