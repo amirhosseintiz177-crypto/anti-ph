@@ -8,6 +8,7 @@ import re
 import io
 import csv
 import math
+import ipaddress
 import collections
 import asyncio
 import traceback
@@ -192,6 +193,72 @@ def _require_panel_cap(session: dict, cap_key: str):
 
 URL_PATTERN = re.compile(r'(https?://[^\s<>"\'\)\]]+|www\.[^\s<>"\'\)\]]+)', re.IGNORECASE)
 BARE_DOMAIN_PATTERN = re.compile(r'(?<!@)(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s<>"\'\)\]]*)?', re.IGNORECASE)
+SHORTENER_DOMAINS = {
+    "bit.ly", "t.co", "tinyurl.com", "goo.gl", "ow.ly", "buff.ly", "is.gd",
+    "s.id", "rebrand.ly", "bitly.com", "t.ly", "cutt.ly", "shorturl.at",
+    "tiny.cc", "lnkd.in", "rb.gy",
+}
+SUSPICIOUS_KEYWORDS = {
+    "login", "verify", "update", "secure", "account", "bank", "payment",
+    "signin", "password", "wallet", "billing",
+}
+
+def _normalize_url_for_parse(url: str) -> str:
+    if not url:
+        return url
+    if re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', url):
+        return url
+    return f"http://{url}"
+
+def _is_ip_address(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+def _url_indicators(url: str, host: str) -> List[str]:
+    indicators: List[str] = []
+    normalized_url = _normalize_url_for_parse(url)
+    parsed = urllib.parse.urlparse(normalized_url)
+    netloc = parsed.netloc or host
+
+    host_lower = (host or "").lower()
+    if host_lower and any(host_lower == d or host_lower.endswith(f".{d}") for d in SHORTENER_DOMAINS):
+        indicators.append("Shortener domain")
+
+    if host_lower and _is_ip_address(host_lower):
+        indicators.append("IP address in URL")
+
+    if "@" in netloc:
+        indicators.append("Userinfo (@) in URL")
+
+    if "xn--" in host_lower:
+        indicators.append("Punycode domain")
+
+    if any(ord(ch) > 127 for ch in host_lower):
+        indicators.append("Unicode in domain")
+
+    if host_lower:
+        labels = [p for p in host_lower.split(".") if p]
+        if len(labels) > 3:
+            indicators.append("Many subdomains")
+
+    if url and len(url) > 120:
+        indicators.append("Long URL")
+
+    path_query = f"{parsed.path}?{parsed.query}".lower()
+    if any(k in path_query for k in SUSPICIOUS_KEYWORDS):
+        indicators.append("Sensitive keywords in path")
+
+    try:
+        port = parsed.port
+        if port and port not in (80, 443):
+            indicators.append("Unusual port")
+    except ValueError:
+        indicators.append("Invalid port")
+
+    return indicators
 
 def _extract_links(text: str, limit: int = 50) -> List[str]:
     if not text:
@@ -233,6 +300,24 @@ def _short_reason(reasons: List[str]) -> str:
         return "Trusted (user)"
     if "trusted globally" in text.lower():
         return "Trusted (global)"
+    if "shortener domain" in text.lower():
+        return "Shortened URL"
+    if "ip address in url" in text.lower():
+        return "IP in URL"
+    if "userinfo" in text.lower():
+        return "Userinfo in URL"
+    if "punycode domain" in text.lower():
+        return "Punycode domain"
+    if "unicode in domain" in text.lower():
+        return "Unicode domain"
+    if "many subdomains" in text.lower():
+        return "Many subdomains"
+    if "long url" in text.lower():
+        return "Long URL"
+    if "sensitive keywords" in text.lower():
+        return "Sensitive keywords"
+    if "unusual port" in text.lower():
+        return "Unusual port"
     if "no trusted domain similar enough" in text.lower():
         return "No similar trusted domain"
     if "fuzzy match" in text.lower():
@@ -634,6 +719,8 @@ class PhishDetector:
                 return {"is_phishing": False, "domain": target_host, "probability": 0, "reasons": ["Trusted globally"]}
         # *****************************************************************
 
+        indicators = _url_indicators(target_url, target_host)
+
         # ML Model Health Check
         if not self.ml_model.is_healthy:
             raise HTTPException(status_code=503, detail={"error": "ML Model unavailable", "message": "DL model failed."})
@@ -706,11 +793,15 @@ class PhishDetector:
                 _blocking_check, effective_sensitivity, PHISH_THRESHOLD
             )
 
+            if indicators:
+                reasons.extend([f"Indicator: {i}" for i in indicators])
+
             # Report only if phishing
-            if is_phishing: self.add_report(target_url, target_host, probability, most_similar_trusted, reasons)
+            if is_phishing:
+                self.add_report(target_url, target_host, probability, most_similar_trusted, reasons)
 
             return {"is_phishing": is_phishing, "domain": target_host, "probability": probability,
-                    "similar_to": most_similar_trusted, "reasons": reasons,
+                    "similar_to": most_similar_trusted, "reasons": reasons, "indicators": indicators,
                     "sensitivity": effective_sensitivity, "user_sensitivity": user_sensitivity,
                     "threshold": PHISH_THRESHOLD} # Also return the threshold for clarity
         except HTTPException: raise
@@ -794,6 +885,7 @@ async def _scan_links(text: str, include_redirects: bool, caps: Dict[str, Any]) 
             "probability": res.get("probability", 0),
             "similar_to": res.get("similar_to"),
             "reasons": res.get("reasons", []),
+            "indicators": res.get("indicators", []),
             "short_reason": short_reason,
             "redirect_chain": chain,
         }
@@ -810,6 +902,7 @@ async def _scan_links(text: str, include_redirects: bool, caps: Dict[str, Any]) 
                 "similar_to": None,
                 "reasons": [str(e)],
                 "short_reason": "Error",
+                "indicators": [],
                 "redirect_chain": [],
             }
         results.append(item)
