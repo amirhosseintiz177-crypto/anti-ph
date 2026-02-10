@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🛡️ پنل مدیریت PhishGuard HQ</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+
+    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;700&display=swap" rel="stylesheet">
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+
+    <style>
+        :root {
+            --primary-color: #00d9ff; --danger-color: #ff3b3b; --success-color: #00ff9d; --warning-color: #ffc400;
+            --bg-deep-dark: #0a0f18; --bg-module: rgba(15, 26, 42, 0.7); --border-color: rgba(0, 217, 255, 0.2);
+            --text-primary: #e0e0e0; --text-secondary: #9badc2;
+            --cyber-glow: 0 0 5px var(--primary-color), 0 0 10px var(--primary-color);
+            --danger-glow: 0 0 5px var(--danger-color);
+        }
+        body { font-family: 'Vazirmatn', 'Share Tech Mono', 'Tahoma', sans-serif; margin: 0; background-color: var(--bg-deep-dark); color: var(--text-primary); line-height: 1.7; position: relative; overflow-x: hidden; }
+        body::after { content: ""; position: fixed; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; background: repeating-linear-gradient(transparent 0, rgba(0, 0, 0, 0.5) 1px, transparent 2px, transparent 3px); animation: scanline 12s linear infinite; z-index: 9999; }
+        @keyframes scanline { from { background-position: 0 0; } to { background-position: 0 120px; } }
+        .header { background: rgba(10, 15, 24, 0.8); backdrop-filter: blur(10px); color: var(--text-primary); padding: 20px 40px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); box-shadow: 0 4px 20px rgba(0, 217, 255, 0.1); position: sticky; top: 0; z-index: 100; }
+        .header h1 { margin: 0; font-size: 1.8rem; color: var(--primary-color); text-shadow: var(--cyber-glow); font-family: 'Share Tech Mono', 'Vazirmatn'; }
+        .header-stats { display: flex; gap: 30px; font-size: 1.1rem; flex-wrap: wrap; } /* Added wrap */
+        .header-stats span strong { color: var(--warning-color); font-size: 1.2rem; margin: 0 5px; text-shadow: 0 0 5px var(--warning-color); animation: pulse-glow 2.5s infinite ease-in-out; }
+        .header-stats .fas { color: var(--primary-color); opacity: 0.7; }
+        @keyframes pulse-glow { 0%, 100% { opacity: 0.8; } 50% { opacity: 1; text-shadow: 0 0 8px var(--warning-color); } }
+
+        /* --- NEW --- Welcome Message CSS */
+        .welcome-container { text-align: center; margin: 10px 0 0 0; padding: 5px 0; }
+        .welcome-message {
+            color: var(--primary-color);
+            font-family: 'Share Tech Mono', monospace;
+            font-size: 1.1rem; /* کمی کوچکتر */
+            overflow: hidden;
+            border-right: .15em solid var(--primary-color);
+            white-space: nowrap;
+            letter-spacing: .1em;
+            animation: typing 3s steps(30, end), blink-caret .75s step-end infinite;
+            display: inline-block; /* Essential */
+            padding-right: 5px; /* کمی فاصله از کرسر */
+            max-width: 100%; /* Ensure it doesn't overflow container */
+        }
+        @keyframes typing { from { width: 0 } to { width: 100% } }
+        @keyframes blink-caret { from, to { border-color: transparent } 50% { border-color: var(--primary-color); } }
+        /* --- End Welcome Message CSS --- */
+
+        .main-content { max-width: 1400px; margin: 20px auto 30px auto; padding: 0 20px; } /* Reduced top margin */
+        .tabs-nav { display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 1px solid var(--border-color); flex-wrap: wrap; }
+        .tab-button { background: transparent; border: none; color: var(--text-secondary); padding: 15px 25px; font-size: 1.1rem; font-family: 'Share Tech Mono', 'Vazirmatn'; cursor: pointer; transition: all 0.3s ease; border-bottom: 3px solid transparent; position: relative; top: 1px; }
+        .tab-button:hover { color: var(--text-primary); }
+        .tab-button.active { color: var(--primary-color); border-bottom-color: var(--primary-color); text-shadow: 0 0 5px var(--primary-color); }
+        .tab-content { display: none; animation: fadeIn 0.5s ease; }
+        .tab-content.active { display: block; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .card { background: var(--bg-module); backdrop-filter: blur(10px); border: 1px solid var(--border-color); padding: 25px; border-radius: 12px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4); transition: transform 0.3s ease, box-shadow 0.3s ease; margin-bottom: 30px; }
+        .card:hover { transform: translateY(-5px); box-shadow: 0 8px 30px rgba(0, 217, 255, 0.15); border-color: rgba(0, 217, 255, 0.5); }
+        .card h2 { font-size: 1.5rem; border-bottom: 1px dashed var(--border-color); padding-bottom: 10px; margin-bottom: 20px; color: var(--primary-color); text-shadow: 0 0 5px var(--primary-color); }
+        .card h3 { color: var(--text-primary); margin-bottom: 10px; }
+        p { color: var(--text-secondary); }
+        .btn { padding: 10px 20px; border: 2px solid; border-radius: 8px; cursor: pointer; font-weight: bold; transition: all 0.3s ease; font-size: 0.95rem; margin-left: 10px; background: transparent; font-family: 'Share Tech Mono', 'Vazirmatn'; text-transform: uppercase; }
+        .btn i { margin-left: 8px; }
+        .btn-primary { border-color: var(--primary-color); color: var(--primary-color); }
+        .btn-primary:hover { background-color: var(--primary-color); color: var(--bg-deep-dark); box-shadow: var(--cyber-glow); }
+        .btn-danger { border-color: var(--danger-color); color: var(--danger-color); }
+        .btn-danger:hover { background-color: var(--danger-color); color: var(--text-primary); box-shadow: var(--danger-glow); }
+        .btn-success { border-color: var(--success-color); color: var(--success-color); }
+        .btn-success:hover { background-color: var(--success-color); color: var(--bg-deep-dark); box-shadow: 0 0 10px var(--success-color); }
+        input[type="text"], input[type="password"], input[type="file"] { padding: 12px; border: 1px solid var(--border-color); border-radius: 8px; width: 300px; margin-left: 10px; transition: all 0.3s; background: rgba(0, 0, 0, 0.2); color: var(--text-primary); font-family: inherit; font-size: 1rem; box-sizing: border-box; } /* Added password type and box-sizing */
+        input[type="text"]:focus, input[type="password"]:focus { border-color: var(--primary-color); box-shadow: 0 0 10px rgba(0, 217, 255, 0.5); outline: none; }
+        input[type="file"] { border-style: dashed; cursor: pointer; }
+        input[type="file"]::file-selector-button { background: var(--primary-color); color: var(--bg-deep-dark); border: none; padding: 8px 12px; border-radius: 5px; cursor: pointer; font-family: 'Vazirmatn'; font-weight: bold; margin-left: 10px; transition: all 0.2s ease; }
+        input[type="file"]::file-selector-button:hover { box-shadow: var(--cyber-glow); }
+        .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }
+        .settings-grid .card { margin-bottom: 0; }
+        .form-row { display: flex; gap: 10px; margin-bottom: 15px; align-items: center; }
+        .form-row input[type="text"], .form-row input[type="password"] { flex-grow: 1; width: auto; margin-left: 0; }
+        .form-row .btn { margin-left: 0; flex-shrink: 0; }
+        .sensitivity-section { display: flex; flex-direction: column; gap: 15px; }
+        #sensitivity-display { font-size: 3rem; font-weight: 900; font-family: 'Share Tech Mono', 'Vazirmatn'; color: var(--primary-color); margin: 10px 0; text-align: center; border-radius: 8px; padding: 10px; background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border-color); transition: color 0.3s ease; text-shadow: 0 0 10px currentColor; }
+        .range-container { width: 100%; display: flex; gap: 15px; align-items: center; font-size: 1.5rem; }
+        #sensitivity-range { flex-grow: 1; height: 6px; background: linear-gradient(to right, var(--success-color), var(--warning-color), var(--danger-color)); -webkit-appearance: none; appearance: none; cursor: pointer; border-radius: 3px; }
+        #sensitivity-range::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 24px; height: 24px; border-radius: 50%; background: var(--primary-color); border: 3px solid var(--bg-deep-dark); box-shadow: 0 0 10px var(--primary-color), 0 0 0 2px var(--bg-deep-dark); transition: transform 0.2s ease; }
+        #sensitivity-range::-webkit-slider-thumb:hover { transform: scale(1.1); }
+        #sensitivity-range::-moz-range-thumb { width: 24px; height: 24px; border-radius: 50%; background: var(--primary-color); border: 3px solid var(--bg-deep-dark); box-shadow: 0 0 10px var(--primary-color), 0 0 0 2px var(--bg-deep-dark); cursor: pointer; }
+        .list-management ul { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 10px; }
+        .list-management li { background: rgba(0, 0, 0, 0.3); padding: 8px 15px; border-radius: 5px; display: flex; align-items: center; font-size: 0.95rem; font-family: 'Share Tech Mono', 'Vazirmatn'; border-left: 3px solid var(--success-color); border-right: none; transition: all 0.2s ease; }
+        .list-management li.blacklist-item { border-left-color: var(--danger-color); }
+        .list-management li:hover { background: rgba(0, 255, 157, 0.1); }
+        .list-management li.blacklist-item:hover { background: rgba(255, 59, 59, 0.1); }
+        .list-management form { display: inline; margin-left: 8px; margin-right: 0; }
+        .list-management .btn-remove { padding: 2px 8px; background: transparent; border: 1px solid var(--danger-color); color: var(--danger-color); margin-right: 0; margin-left: 8px; font-size: 0.8rem; border-radius: 4px; }
+        .list-management .btn-remove:hover { background: var(--danger-color); color: var(--text-primary); }
+        .report-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        .report-table th, .report-table td { padding: 14px; text-align: right; font-size: 0.9rem; border-bottom: 1px solid var(--border-color); }
+        .report-table th { background-color: var(--bg-module); color: var(--primary-color); font-weight: bold; position: sticky; top: 0; font-size: 0.85rem; text-transform: uppercase; }
+        .report-table tbody tr:hover { background-color: rgba(0, 217, 255, 0.05); }
+        .report-table td strong { display: block; font-weight: bold; color: var(--primary-color); font-size: 1.1rem; font-family: 'Share Tech Mono', 'Vazirmatn'; }
+        .report-table .btn-small { padding: 5px 10px; font-size: 0.8rem; margin: 0 3px; }
+        .report-table .btn-quick-whitelist { border-color: var(--success-color); color: var(--success-color); }
+        .report-table .btn-quick-whitelist:hover { background: var(--success-color); color: var(--bg-deep-dark); }
+        .prob-low { color: var(--success-color); }
+        .prob-medium { color: var(--warning-color); font-weight: bold; }
+        .prob-high { color: var(--danger-color); font-weight: bold; text-shadow: 0 0 5px var(--danger-color); animation: pulse-glow 2s infinite; }
+        code, .current-file-display { direction: ltr; background: #000; color: var(--success-color); padding: 5px 10px; border-radius: 4px; font-weight: bold; font-family: 'Share Tech Mono', 'Vazirmatn'; border: 1px solid var(--success-color); }
+        .chart-container { position: relative; height: 250px; width: 100%; }
+        .system-log { height: 250px; background: #000; border: 1px solid var(--border-color); border-radius: 8px; padding: 15px; overflow-y: auto; font-family: 'Share Tech Mono', monospace; font-size: 0.9rem; }
+        .system-log .log-message { color: var(--text-secondary); margin: 0; line-height: 1.6; }
+        .system-log .log-message.startup-msg { color: var(--success-color); }
+        .system-log .log-message.error-msg { color: var(--danger-color); }
+        .analysis-result { background: #000; border: 1px solid var(--border-color); padding: 20px; margin-top: 20px; border-radius: 8px; font-family: 'Share Tech Mono', monospace; line-height: 1.8; }
+        .user-list { list-style: none; padding: 0; }
+        .user-list li { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px dashed var(--border-color); }
+        .user-list li:last-child { border-bottom: none; }
+        .user-list form { margin: 0; }
+        .user-list .btn-remove { margin: 0; }
+        .footer { margin-top: 40px; text-align: center; padding-bottom: 20px; color: var(--text-secondary); font-size: 0.9rem; }
+        /* Modal Styles */
+        .modal-backdrop { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(5px); z-index: 1000; display: none; opacity: 0; animation: fadeInModal 0.3s forwards; }
+        .modal-backdrop.active { display: block; }
+        .modal-content { position: absolute; top: 50%; right: 50%; transform: translate(50%, -50%); width: 90%; max-width: 600px; background: var(--bg-module); border: 1px solid var(--border-color); border-radius: 12px; box-shadow: 0 10px 40px rgba(0, 217, 255, 0.3); z-index: 1001; color: var(--text-primary); animation: slideInModal 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards; }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 15px 25px; border-bottom: 1px dashed var(--border-color); }
+        .modal-header h2 { margin: 0; color: var(--primary-color); text-shadow: var(--cyber-glow); font-size: 1.4rem; }
+        .modal-close-btn { background: transparent; border: none; color: var(--text-secondary); font-size: 2rem; cursor: pointer; transition: all 0.2s ease; }
+        .modal-close-btn:hover { color: var(--danger-color); transform: rotate(90deg); }
+        .modal-body { padding: 25px; max-height: 60vh; overflow-y: auto; font-family: 'Share Tech Mono', monospace; line-height: 2; }
+        .modal-body strong { color: var(--primary-color); min-width: 120px; display: inline-block; }
+        .modal-body .full-url { color: var(--warning-color); word-break: break-all; }
+        @keyframes fadeInModal { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes slideInModal { from { opacity: 0; transform: translate(50%, -40%); } to { opacity: 1; transform: translate(50%, -50%); } }
+        /* Responsive */
+        @media (max-width: 900px) {
+            .settings-grid { grid-template-columns: 1fr; }
+            .header { flex-direction: column; gap: 15px; padding: 20px; }
+            .header-stats { gap: 15px; justify-content: center; }
+            .tabs-nav { justify-content: center; }
+            input[type="text"], input[type="password"], input[type="file"] { width: 100%; margin-left: 0; }
+            .form-row { flex-direction: column; align-items: stretch !important; }
+            .form-row .btn { margin-top: 10px; }
+            .modal-content { width: 95%; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1><i class="fas fa-shield-alt"></i> PhishGuard HQ</h1>
+        <div class="header-stats">
+            <span><i class="fas fa-globe"></i> مخزن: <strong>{{ "{:,}".format(trusted_count | int) }}</strong></span>
+            <span><i class="fas fa-user-check"></i> مورد اعتماد: <strong>{{ user_trusted|length }}</strong></span>
+            <span><i class="fas fa-ban"></i> لیست سیاه: <strong>{{ user_blacklist|length }}</strong></span> <span><i class="fas fa-flag"></i> گزارش‌ها: <strong>{{ recent|length }}</strong></span>
+        </div>
+    </div>
+
+    <div class="welcome-container">
+        <div class="welcome-message" id="welcome-message"></div>
+    </div>
+
+    <div class="main-content">
+
+        <div class="tabs-nav">
+            <button class="tab-button active" data-tab="dashboard"><i class="fas fa-tachometer-alt"></i> داشبورد</button>
+            <button class="tab-button" data-tab="domains"><i class="fas fa-list-alt"></i> مدیریت دامنه‌ها</button>
+            <button class="tab-button" data-tab="logs"><i class="fas fa-file-alt"></i> گزارش‌ها</button>
+            <button class="tab-button" data-tab="tools"><i class="fas fa-vial"></i> ابزارها</button>
+            <button class="tab-button" data-tab="system"><i class="fas fa-cog"></i> سیستم</button>
+        </div>
+
+        <div id="dashboard" class="tab-content active">
+             <div class="settings-grid">
+                <div class="card"> <h2><i class="fas fa-sliders-h"></i> تنظیم حساسیت (THRESHOLD)</h2>
+                    <p>حساسیت کلی سرور (۵۰% کمترین، ۱۰۰% بیشترین بلاک).</p>
+                    <div id="sensitivity-display">{{ server_sensitivity }}%</div>
+                    <form method="POST" action="/admin/set_sensitivity" class="sensitivity-section">
+                        <input type="hidden" id="final-sensitivity" name="sensitivity" value="{{ server_sensitivity }}">
+                        <div class="range-container">
+                            <i class="fas fa-hand-point-right" style="color: var(--success-color);"></i>
+                            <input type="range" min="50" max="100" value="{{ server_sensitivity }}" id="sensitivity-range" oninput="updateSensitivityDisplay(this.value)">
+                            <i class="fas fa-shield-virus" style="color: var(--danger-color);"></i>
+                        </div>
+                        <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> ذخیره</button>
+                    </form>
+                </div>
+                <div class="card"> <h2><i class="fas fa-heartbeat"></i> وضعیت سلامت سرور</h2>
+                    <p style="direction: ltr; text-align: left; font-family: 'Share Tech Mono', monospace; line-height: 2.2;">
+                        <strong>ML Model:</strong> <span style="color: {{ 'var(--success-color)' if server_health.ml_model == 'OK' else 'var(--danger-color)' }}">{{ server_health.ml_model }}</span><br>
+                        <strong>Global Cache:</strong> <span style="color: {{ 'var(--success-color)' if 'OK' in server_health.global_cache else 'var(--warning-color)' }}">{{ server_health.global_cache }}</span><br>
+                        <strong>Uptime:</strong> {{ server_health.uptime_seconds }} ثانیه
+                    </p>
+                </div>
+            </div>
+
+            <div class="settings-grid">
+                <div class="card"> <h2><i class="fas fa-chart-line"></i> حملات در 24 ساعت گذشته</h2>
+                    <div class="chart-container">
+                        <canvas id="attacksChart"></canvas>
+                    </div>
+                </div>
+                <div class="card"> <h2><i class="fas fa-satellite-dish"></i> فید زنده گزارش‌ها (LIVE FEED)</h2>
+                    <div id="live-log-feed" class="system-log">
+                        <p class="log-message startup-msg">// Awaiting new reports via WebSocket...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="domains" class="tab-content">
+            <div class="settings-grid list-management"> <div class="card"> <h2><i class="fas fa-heart"></i> لیست سفید (Whitelist)</h2>
+                    <p>دامنه‌هایی که هرگز نباید بلاک شوند.</p>
+                    <form method="POST" action="/admin/add_trusted" class="form-row">
+                        <input type="text" name="site" placeholder="example.com" required>
+                        <button type="submit" class="btn btn-success"><i class="fas fa-plus-circle"></i> افزودن</button>
+                    </form>
+                    <h3>دامنه‌های موجود:</h3>
+                    {% if user_trusted %}
+                        <ul>
+                            {% for site in user_trusted %}
+                                <li>
+                                    <form method="POST" action="/admin/remove_trusted">
+                                        <input type="hidden" name="site" value="{{ site }}">
+                                        <button type="submit" class="btn btn-remove" title="حذف"><i class="fas fa-times"></i></button>
+                                    </form>
+                                    <span>{{ site }}</span>
+                                </li>
+                            {% endfor %}
+                        </ul>
+                    {% else %}
+                        <p style="color: var(--warning-color); font-style: italic;">لیست سفید خالی است.</p>
+                    {% endif %}
+                </div>
+
+                <div class="card"> <h2><i class="fas fa-ban"></i> لیست سیاه (Blacklist)</h2>
+                    <p>دامنه‌هایی که همیشه باید بلاک شوند.</p>
+                    <form method="POST" action="/admin/add_blacklist" class="form-row">
+                        <input type="text" name="site" placeholder="bad-site.com" required>
+                        <button type="submit" class="btn btn-danger"><i class="fas fa-plus-circle"></i> افزودن</button>
+                    </form>
+                    <h3>دامنه‌های بلاک شده:</h3>
+                    {% if user_blacklist %}
+                        <ul>
+                            {% for site in user_blacklist %}
+                                <li class="blacklist-item">
+                                    <form method="POST" action="/admin/remove_blacklist">
+                                        <input type="hidden" name="site" value="{{ site }}">
+                                        <button type="submit" class="btn btn-remove" title="حذف"><i class="fas fa-times"></i></button>
+                                    </form>
+                                    <span>{{ site }}</span>
+                                </li>
+                            {% endfor %}
+                        </ul>
+                    {% else %}
+                        <p style="color: var(--warning-color); font-style: italic;">لیست سیاه خالی است.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+
+        <div id="logs" class="tab-content">
+            <div class="card">
+                <h2><i class="fas fa-file-alt"></i> گزارش‌های اخیر تشخیص فیشینگ (LOGS)</h2>
+                <p>نمایش حداکثر {{ recent|length }} مورد اخیر.</p>
+                <div style="max-height: 500px; overflow-y: auto;">
+                    <table class="report-table">
+                         <thead>
+                            <tr>
+                                <th>زمان</th>
+                                <th>دامنه مشکوک</th>
+                                <th>احتمال (%)</th>
+                                <th>مشابهت با</th>
+                                <th>عملیات</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for r in recent %}
+                            <tr>
+                                <td>{{ r.time }}</td>
+                                <td><strong>{{ r.domain }}</strong></td>
+                                {% set prob_class = 'prob-low' %}
+                                {% if r.probability >= 90 %} {% set prob_class = 'prob-high' %}
+                                {% elif r.probability > 70 %} {% set prob_class = 'prob-medium' %}
+                                {% endif %}
+                                <td class="{{ prob_class }}">{{ r.probability }}</td>
+                                <td>{{ r.similar_to or '—' }}</td>
+                                <td>
+                                    <button class="btn btn-primary btn-small"
+                                        onclick="openLogDetails('{{ r.url }}', '{{ r.domain }}', {{ r.probability }}, '{{ r.similar_to or '—' }}', {{ r.reasons|tojson|safe }})">
+                                        <i class="fas fa-search"></i> بررسی
+                                    </button>
+                                    <button class="btn btn-success btn-small btn-quick-whitelist"
+                                            title="افزودن به لیست سفید"
+                                            onclick="quickAction('add_trusted', '{{ r.domain }}')">
+                                        <i class="fas fa-heart" style="margin: 0;"></i>
+                                    </button>
+                                    <button class="btn btn-danger btn-small"
+                                            title="افزودن به لیست سیاه"
+                                            onclick="quickAction('add_blacklist', '{{ r.domain }}')">
+                                        <i class="fas fa-ban" style="margin: 0;"></i>
+                                    </button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                 {% if not recent %}
+                    <p style="text-align: center; padding: 20px; color: #7f8c8d;">هیچ گزارشی برای نمایش وجود ندارد.</p>
+                {% endif %}
+            </div>
+        </div>
+
+        <div id="tools" class="tab-content">
+             <div class="card">
+                <h2><i class="fas fa-vial"></i> آنالایزر دستی URL</h2>
+                <p>یک URL را برای بررسی آنی وارد کنید (این بررسی لاگ نمی‌شود).</p>
+                <form id="analyze-form" class="form-row" style="margin-top: 20px;">
+                    <input type="text" id="url-to-analyze" placeholder="https://google-login.com" required style="direction: ltr;">
+                    <button type="submit" class="btn btn-primary"><i class="fas fa-play-circle"></i> آنالیز کن</button>
+                </form>
+                <div id="analysis-result" class="analysis-result" hidden></div>
+            </div>
+        </div>
+
+
+        <div id="system" class="tab-content">
+            <div class="settings-grid">
+                <div class="card"> <h2><i class="fas fa-file-upload"></i> مدیریت فایل افزونه</h2>
+                    <p>فایل جدید افزونه را آپلود کنید. (فایل قبلی جایگزین می‌شود)</p>
+                    <form method="POST" action="/admin/upload_extension" enctype="multipart/form-data" class="form-row" style="margin-top: 20px;">
+                        <input type="file" name="extension_file" id="extension_file_input" required accept=".zip,.crx"> <button type="submit" class="btn btn-success"><i class="fas fa-upload"></i> آپلود</button>
+                    </form>
+                    <p style="margin-top: 20px; font-size: 0.9rem;">
+                        {% if current_extension_file %}
+                            فایل فعال: <code class="current-file-display">{{ current_extension_file }}</code>
+                        {% else %}
+                            <span style="color: var(--danger-color); font-weight: bold;">هنوز هیچ فایلی آپلود نشده است.</span>
+                        {% endif %}
+                    </p>
+                </div>
+
+                <div class="card"> <h2><i class="fas fa-database"></i> پشتیبان‌گیری و پاکسازی</h2>
+                    <p>مدیریت داده‌های سیستم.</p>
+                    <div style="display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap;">
+                        <a href="/admin/backup_whitelist" class="btn btn-success"><i class="fas fa-download"></i> بکاپ Whitelist</a>
+                        <a href="/admin/backup_logs" class="btn btn-primary"><i class="fas fa-download"></i> بکاپ گزارش‌ها</a>
+                        <button class="btn btn-danger" onclick="confirmPurge('logs')"><i class="fas fa-trash"></i> پاکسازی لاگ‌ها</button>
+                    </div>
+                </div>
+
+            </div> <div class="card">
+                <h2><i class="fas fa-users-cog"></i> مدیریت کاربران ادمین</h2>
+                <div class="settings-grid">
+                    <div>
+                        <h3>افزودن کاربر جدید:</h3>
+                        <form method="POST" action="/admin/add_user">
+                            <div class="form-row" style="flex-direction: column; align-items: stretch;">
+                                <input type="text" name="new_username" placeholder="نام کاربری جدید" required>
+                                <input type="password" name="new_password" placeholder="رمز عبور جدید" required>
+                                <input type="text" name="display_name" placeholder="نام نمایشی (مثلا: Ali)" required>
+                            </div>
+                            <button type="submit" class="btn btn-success"><i class="fas fa-user-plus"></i> افزودن کاربر</button>
+                        </form>
+                    </div>
+                    <div>
+                        <h3>کاربران موجود:</h3>
+                        {% if all_admin_users %}
+                        <ul class="user-list">
+                            {% for username, user_data in all_admin_users.items() %}
+                            <li>
+                                <span>
+                                    <i class="fas fa-user-shield"></i> {{ user_data.display_name }} ({{ username }})
+                                    {% if username == request.session.get("username") %}
+                                        <small style="color: var(--success-color);">(شما)</small>
+                                    {% endif %}
+                                </span>
+                                {% if username != request.session.get("username") and all_admin_users|length > 1 %}
+                                <form method="POST" action="/admin/remove_user" onsubmit="return confirm('آیا از حذف کاربر ادمین {{ username }} مطمئن هستید؟');">
+                                    <input type="hidden" name="username_to_remove" value="{{ username }}">
+                                    <button type="submit" class="btn btn-remove" title="حذف کاربر"><i class="fas fa-user-times"></i></button>
+                                </form>
+                                {% endif %}
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% else %}
+                        <p style="color: var(--warning-color);">خطا: لیستی یافت نشد.</p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2><i class="fas fa-users"></i> مدیریت کاربران عادی (افزونه)</h2>
+                <div class="settings-grid">
+                    <div>
+                        <h3>افزودن کاربر عادی:</h3>
+                        <form method="POST" action="/admin/add_normal_user">
+                            <div class="form-row" style="flex-direction: column; align-items: stretch;">
+                                <input type="text" name="new_normal_username" placeholder="نام کاربری جدید" required>
+                                <input type="password" name="new_normal_password" placeholder="رمز عبور جدید" required>
+                                <input type="text" name="normal_display_name" placeholder="نام نمایشی (مثلا: Sara)" required>
+                            </div>
+                            <button type="submit" class="btn btn-success"><i class="fas fa-user-plus"></i> افزودن کاربر</button>
+                        </form>
+                    </div>
+                    <div>
+                        <h3>کاربران عادی موجود:</h3>
+                        {% if all_normal_users %}
+                        <ul class="user-list">
+                            {% for username, user_data in all_normal_users.items() %}
+                            <li>
+                                <span>
+                                    <i class="fas fa-user"></i> {{ user_data.display_name }} ({{ username }})
+                                </span>
+                                <form method="POST" action="/admin/remove_normal_user" onsubmit="return confirm('آیا از حذف کاربر عادی {{ username }} مطمئن هستید؟');">
+                                    <input type="hidden" name="username_to_remove_normal" value="{{ username }}">
+                                    <button type="submit" class="btn btn-remove" title="حذف کاربر"><i class="fas fa-user-times"></i></button>
+                                </form>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% else %}
+                        <p style="color: var(--warning-color);">هیچ کاربر عادی یافت نشد.</p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            <div class="card"> <h2><i class="fas fa-power-off"></i> عملیات سیستم</h2>
+                <div class="settings-grid">
+                    <div>
+                        <h3>خروج:</h3>
+                        <p>با خیال راحت از پنل خارج شوید.</p>
+                        <a href="/logout" class="btn btn-primary"><i class="fas fa-sign-out-alt"></i> خروج</a>
+                    </div>
+                    <div>
+                        <h3>خاموش کردن سرور:</h3>
+                        <p style="color: var(--danger-color);"><i class="fas fa-exclamation-triangle"></i> احتیاط: سرور اصلی را متوقف می‌کند.</p>
+                        <button id="shutdownServer" class="btn btn-danger" onclick="confirmShutdown()"><i class="fas fa-power-off"></i> خاموش کردن</button>
+                    </div>
+                </div>
+            </div>
+        </div> </div> <div id="log-details-modal" class="modal-backdrop" onclick="closeModalIfOutside(event)">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2><i class="fas fa-microchip"></i> آنالیز گزارش</h2>
+                <button class="modal-close-btn" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p><strong>URL کامل:</strong> <span id="modal-full-url" class="full-url">...</span></p>
+                <p><strong>دامنه:</strong> <span id="modal-domain">...</span></p>
+                <p><strong>احتمال:</strong> <span id="modal-prob" class="prob-high">...</span></p>
+                <p><strong>مشابهت:</strong> <span id="modal-similar">...</span></p>
+                <hr style="border-color: var(--border-color); border-style: dashed;">
+                <p><strong>دلایل فنی (Reasons):</strong></p>
+                <div id="modal-reasons" style="font-size: 0.9rem; color: var(--text-secondary); padding-right: 15px;"></div>
+            </div>
+        </div>
+    </div>
+
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // --- Tab Logic ---
+            const tabButtons = document.querySelectorAll('.tab-button');
+            const tabContents = document.querySelectorAll('.tab-content');
+            // Check URL for tab parameter on load
+            const urlParams = new URLSearchParams(window.location.search);
+            const initialTab = urlParams.get('tab') || 'dashboard'; // Default to dashboard
+
+            function activateTab(tabId) {
+                // Failsafe: If the tab doesn't exist (e.g., on user panel), default to dashboard
+                if (!document.getElementById(tabId)) {
+                    tabId = 'dashboard';
+                }
+                
+                tabButtons.forEach(button => {
+                    button.classList.toggle('active', button.getAttribute('data-tab') === tabId);
+                });
+                tabContents.forEach(content => {
+                    content.classList.toggle('active', content.id === tabId);
+                });
+            }
+
+            tabButtons.forEach(button => {
+                button.addEventListener('click', () => {
+                    const tabId = button.getAttribute('data-tab');
+                    activateTab(tabId);
+                    // Update URL without reloading (optional)
+                    // window.history.pushState(null, '', `?tab=${tabId}`);
+                });
+            });
+            activateTab(initialTab); // Activate initial tab
+
+
+            // --- Chart Logic ---
+            const ctx = document.getElementById('attacksChart');
+            if (ctx) { /* ... (کد نمودار قبلی بدون تغییر) ... */
+                new Chart(ctx, { type: 'line', data: { labels: ['20', '21', '22', '23', '00', '01', '02'], datasets: [{ label: 'حملات شناسایی شده', data: [1, 0, 3, 5, 2, 4, 1], borderColor: 'var(--primary-color)', backgroundColor: 'rgba(0, 217, 255, 0.2)', fill: true, tension: 0.4 }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: 'var(--text-secondary)' } }, x: { grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: 'var(--text-secondary)' } } }, plugins: { legend: { labels: { color: 'var(--text-primary)' } } } } });
+            }
+
+            // --- Analyze Form Logic ---
+            const analyzeForm = document.getElementById('analyze-form');
+            const analysisResult = document.getElementById('analysis-result');
+            if (analyzeForm) {
+                analyzeForm.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const urlToAnalyze = document.getElementById('url-to-analyze').value;
+                    analysisResult.hidden = false;
+                    analysisResult.innerHTML = '<p style="color: var(--warning-color);">// در حال آنالیز...</p>';
+                    try {
+                        const response = await fetch('/admin/analyze_url', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: urlToAnalyze }) });
+                        const result = await response.json();
+                        let reasonsHtml = (result.reasons || []).map(r => `<span>- ${r}</span><br>`).join('');
+                        let resultColor = result.is_phishing ? 'var(--danger-color)' : 'var(--success-color)';
+                        analysisResult.innerHTML = `<p style="color: ${resultColor}; font-size: 1.2rem; font-weight: bold;">${result.is_phishing ? `[PHISHING DETECTED] (${result.probability}%)` : '[SAFE]'}</p><p><strong>Domain:</strong> ${result.domain}</p><p><strong>Similar To:</strong> ${result.similar_to || 'N/A'}</p><p><strong>Reasons:</strong><br>${reasonsHtml || 'N/A'}</p>`;
+                    } catch (err) { analysisResult.innerHTML = '<p style="color: var(--danger-color);">// خطا در ارتباط با سرور آنالیز.</p>'; }
+                });
+            }
+
+            // --- Welcome Message Typing ---
+            const welcomeElement = document.getElementById('welcome-message');
+            if (welcomeElement) {
+                const adminName = "{{ admin_display_name }}"; // Get from Jinja2
+                const welcomeText = `خوش آمدی ${adminName} >> `;
+                welcomeElement.textContent = ''; // Clear initial text
+                let i = 0;
+                function typeWriter() {
+                    if (i < welcomeText.length) {
+                        welcomeElement.textContent += welcomeText.charAt(i);
+                        i++;
+                        setTimeout(typeWriter, 100); // Adjust speed (milliseconds)
+                    } else {
+                         // Keep cursor blinking after typing finishes
+                         welcomeElement.style.borderRight = '.15em solid var(--primary-color)';
+                         welcomeElement.style.animation = 'blink-caret .75s step-end infinite';
+                    }
+                }
+                 // Start typing animation with a slight delay
+                 welcomeElement.style.width = '0'; // Start with zero width for animation
+                 welcomeElement.style.animation = 'none'; // Temporarily disable blink
+                 setTimeout(() => {
+                    welcomeElement.style.animation = ''; // Re-enable animations
+                    typeWriter();
+                 }, 500);
+            }
+        });
+
+        // --- Sensitivity Slider ---
+        const sensitivityDisplay = document.getElementById('sensitivity-display');
+        const sensitivityRange = document.getElementById('sensitivity-range');
+        const finalSensitivityInput = document.getElementById('final-sensitivity');
+        function updateSensitivityDisplay(value) { /* ... (کد قبلی بدون تغییر) ... */
+             if (!sensitivityDisplay || !finalSensitivityInput) return; sensitivityDisplay.textContent = `${value}%`; finalSensitivityInput.value = value; if (value >= 90) sensitivityDisplay.style.color = 'var(--danger-color)'; else if (value >= 75) sensitivityDisplay.style.color = 'var(--warning-color)'; else sensitivityDisplay.style.color = 'var(--success-color)';
+        }
+        if (sensitivityRange) updateSensitivityDisplay(sensitivityRange.value);
+
+        // --- Shutdown ---
+        function confirmShutdown() { /* ... (کد قبلی بدون تغییر) ... */
+             if (confirm("آیا مطمئن هستید؟ سرور خاموش می‌شود.")) { fetch('/admin/shutdown', { method: 'POST' }).then(() => { alert('درخواست خاموش شدن ارسال شد.'); setTimeout(() => window.location.href = '/logout', 1000); }).catch(() => alert('خطا در ارتباط.')); }
+        }
+
+        // --- Purge ---
+        function confirmPurge(type) { /* ... (کد قبلی بدون تغییر) ... */
+             if (confirm(`آیا از پاکسازی تمام ${type === 'logs' ? 'گزارش‌ها' : '...'} مطمئن هستید؟ این عمل غیرقابل بازگشت است.`)) { fetch(`/admin/purge_${type}`, { method: 'POST' }).then(res => res.json()).then(data => { if (data.status === 'success') { alert('پاکسازی با موفقیت انجام شد.'); location.reload(); } else { alert('خطا در پاکسازی.'); } }); }
+        }
+
+        // --- Quick Actions ---
+        async function quickAction(action, domain) { /* ... (کد قبلی بدون تغییر) ... */
+             let endpoint = action === 'add_trusted' ? '/admin/add_trusted' : '/admin/add_blacklist'; let msg = action === 'add_trusted' ? 'به لیست سفید اضافه شد.' : 'به لیست سیاه اضافه شد.'; try { const formData = new FormData(); formData.append('site', domain); const response = await fetch(endpoint, { method: 'POST', body: formData }); if (response.ok) { alert(`${domain} ${msg}`); location.reload(); /* Reload to update list */ } else { alert('عملیات ناموفق بود.'); } } catch (err) { alert('خطای شبکه.'); }
+        }
+
+        // --- Modal ---
+        const modal = document.getElementById('log-details-modal');
+        function openLogDetails(url, domain, prob, similar, reasons_array) { /* ... (کد قبلی بدون تغییر) ... */
+            document.getElementById('modal-full-url').textContent = url; document.getElementById('modal-domain').textContent = domain; document.getElementById('modal-prob').textContent = `${prob}%`; document.getElementById('modal-similar').textContent = similar || 'N/A'; const probEl = document.getElementById('modal-prob'); probEl.className = ''; if (prob >= 90) probEl.classList.add('prob-high'); else if (prob > 70) probEl.classList.add('prob-medium'); else probEl.classList.add('prob-low'); const reasonsContainer = document.getElementById('modal-reasons'); reasonsContainer.innerHTML = ''; if (reasons_array && reasons_array.length > 0) { reasons_array.forEach(reason => { reasonsContainer.innerHTML += `<span>- ${reason}</span><br>`; }); } else { reasonsContainer.innerHTML = '<span>- N/A</span>'; } modal.classList.add('active');
+        }
+        function closeModal() { modal.classList.remove('active'); }
+        function closeModalIfOutside(event) { if (event.target === modal) closeModal(); }
+
+    </script>
+</body>
+</html>

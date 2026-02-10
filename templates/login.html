@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PhishGuard HQ - ورود به پنل</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+    
+    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;700&display=swap" rel="stylesheet">
+    
+    <style>
+        :root {
+            --primary-color: #00d9ff; --danger-color: #ff3b3b;
+            --bg-deep-dark: #0a0f18; --bg-module: rgba(15, 26, 42, 0.7); --border-color: rgba(0, 217, 255, 0.2);
+            --text-primary: #e0e0e0; --text-secondary: #9badc2;
+            --cyber-glow: 0 0 8px var(--primary-color), 0 0 15px var(--primary-color);
+        }
+        body { font-family: 'Vazirmatn', 'Share Tech Mono', sans-serif; background-color: var(--bg-deep-dark); color: var(--text-primary); margin: 0; display: grid; place-items: center; min-height: 100vh; position: relative; overflow-x: hidden; }
+        body::after { content: ""; position: fixed; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; background: repeating-linear-gradient(transparent 0, rgba(0, 0, 0, 0.5) 1px, transparent 2px, transparent 3px); animation: scanline 12s linear infinite; z-index: 9999; }
+        @keyframes scanline { from { background-position: 0 0; } to { background-position: 0 120px; } }
+        .login-box { width: 100%; max-width: 400px; padding: 40px; background: var(--bg-module); backdrop-filter: blur(10px); border: 1px solid var(--border-color); border-radius: 12px; box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4); text-align: center; z-index: 10; }
+        .login-box h1 { font-size: 1.8rem; color: var(--text-primary); margin-bottom: 30px; border-bottom: 1px dashed var(--border-color); padding-bottom: 10px; }
+        .icon-lock { font-size: 3rem; color: var(--primary-color); margin-bottom: 20px; text-shadow: var(--cyber-glow); }
+        .input-group { margin-bottom: 20px; text-align: right; position: relative; }
+        .input-group label { display: block; margin-bottom: 8px; font-weight: 500; color: var(--text-secondary); font-size: 0.9rem; }
+        .input-group input { width: 100%; padding: 12px 12px 12px 40px; border: 1px solid var(--border-color); border-radius: 8px; transition: all 0.3s; box-sizing: border-box; font-size: 1rem; background: rgba(0, 0, 0, 0.3); color: var(--text-primary); font-family: 'Share Tech Mono', 'Vazirmatn'; }
+        .input-group input:focus { border-color: var(--primary-color); outline: none; box-shadow: 0 0 10px rgba(0, 217, 255, 0.5); }
+        .input-group .input-icon { position: absolute; left: 15px; top: 40px; color: var(--text-secondary); }
+        .btn-login { width: 100%; padding: 12px; border: none; border-radius: 8px; background-color: var(--primary-color); color: var(--bg-deep-dark); font-size: 1.1rem; font-weight: bold; cursor: pointer; transition: all 0.3s ease; font-family: 'Share Tech Mono', 'Vazirmatn'; text-transform: uppercase; }
+        .btn-login:hover { background-color: #fff; box-shadow: 0 0 20px rgba(0, 217, 255, 0.8); transform: translateY(-1px); }
+        .error-message { background-color: rgba(255, 59, 59, 0.1); color: var(--danger-color); border: 1px solid var(--danger-color); text-shadow: 0 0 5px var(--danger-color); padding: 10px; border-radius: 6px; margin-bottom: 20px; font-weight: bold; }
+        .back-link { display: block; margin-top: 25px; color: var(--primary-color); text-decoration: none; font-size: 0.9rem; transition: all 0.3s ease; }
+        .back-link:hover { color: #fff; text-shadow: 0 0 5px var(--primary-color); }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <i class="fas fa-lock icon-lock"></i>
+        <h1>ورود به پنل مدیریت</h1>
+
+        {% if error %}
+            <div class="error-message">
+                <i class="fas fa-exclamation-circle"></i> {{ error }}
+            </div>
+        {% endif %}
+
+        <form method="POST" action="/login">
+            <div class="input-group">
+                <label for="username">نام کاربری:</label>
+                <input type="text" id="username" name="username" placeholder="نام کاربری ادمین" required>
+                <i class="fas fa-user input-icon"></i>
+            </div>
+            
+            <div class="input-group">
+                <label for="password">رمز عبور:</label>
+                <input type="password" id="password" name="password" placeholder="رمز عبور" required>
+                <i class="fas fa-key input-icon"></i>
+            </div>
+            
+            <button type="submit" class="btn-login">
+                <i class="fas fa-sign-in-alt"></i> ورود
+            </button>
+        </form>
+
+        <a href="/" class="back-link">
+            <i class="fas fa-arrow-right"></i> بازگشت به صفحه اصلی
+        </a>
+    </div>
+</body>
+</html>

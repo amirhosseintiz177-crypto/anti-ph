@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PhishGuard HQ - خوش آمدید</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+    
+    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;700&display=swap" rel="stylesheet">
+    
+    <style>
+        :root {
+            --primary-color: #00d9ff; --danger-color: #ff3b3b; --success-color: #00ff9d;
+            --bg-deep-dark: #0a0f18; --bg-module: rgba(15, 26, 42, 0.7); --border-color: rgba(0, 217, 255, 0.2);
+            --text-primary: #e0e0e0; --text-secondary: #9badc2;
+            --cyber-glow: 0 0 8px var(--primary-color), 0 0 15px var(--primary-color);
+        }
+        body { font-family: 'Vazirmatn', 'Share Tech Mono', sans-serif; background-color: var(--bg-deep-dark); color: var(--text-primary); margin: 0; display: grid; place-items: center; min-height: 100vh; text-align: center; position: relative; overflow-x: hidden; }
+        body::after { content: ""; position: fixed; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; background: repeating-linear-gradient(transparent 0, rgba(0, 0, 0, 0.5) 1px, transparent 2px, transparent 3px); animation: scanline 12s linear infinite; z-index: 9999; }
+        @keyframes scanline { from { background-position: 0 0; } to { background-position: 0 120px; } }
+        .container { max-width: 600px; background: var(--bg-module); backdrop-filter: blur(10px); border: 1px solid var(--border-color); padding: 40px; border-radius: 15px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4); transition: all 0.5s ease; z-index: 10; }
+        h1 { font-size: 2.5rem; color: var(--primary-color); text-shadow: var(--cyber-glow); margin-bottom: 10px; font-weight: 700; }
+        .subtitle { font-size: 1.2rem; color: var(--text-secondary); margin-bottom: 30px; }
+        .status-badge { display: inline-block; background-color: var(--success-color); color: #000; padding: 8px 15px; border-radius: 50px; font-weight: bold; margin-bottom: 40px; box-shadow: 0 0 15px rgba(0, 255, 157, 0.5); font-size: 0.9rem; }
+        .cta-button { display: inline-block; background-color: var(--primary-color); color: var(--bg-deep-dark); padding: 15px 30px; border-radius: 8px; text-decoration: none; font-size: 1.1rem; font-weight: bold; transition: all 0.3s ease; box-shadow: 0 0 20px rgba(0, 217, 255, 0.5); border: none; font-family: 'Share Tech Mono', 'Vazirmatn'; text-transform: uppercase; }
+        .cta-button:hover { background-color: #fff; color: var(--bg-deep-dark); transform: translateY(-2px); box-shadow: 0 0 30px rgba(0, 217, 255, 0.8); }
+        .links-section { margin-top: 30px; padding-top: 20px; border-top: 1px dashed var(--border-color); display: flex; justify-content: center; gap: 20px; }
+        .links-section a { color: var(--primary-color); text-decoration: none; font-size: 0.95rem; transition: all 0.3s; }
+        .links-section a:hover { color: #fff; text-shadow: var(--cyber-glow); }
+        .disabled-button { background: transparent; border: 2px solid var(--danger-color); color: var(--danger-color); opacity: 0.7; cursor: not-allowed; box-shadow: none; }
+        .disabled-button:hover { transform: none; background: transparent; color: var(--danger-color); box-shadow: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <span class="status-badge">
+            <i class="fas fa-check-circle"></i> سرویس فعال است
+        </span>
+        
+        <h1>سیستم تشخیص فیشینگ هوشمند</h1>
+        <p class="subtitle">موتور قدرتمند ML برای افزونه مرورگر شما.</p>
+        
+        <p style="margin-bottom: 40px; color: var(--text-secondary);">
+            برای فعال‌سازی، افزونه رسمی را به مرورگر خود اضافه کنید.
+        </p>
+
+        {% if extension_download_path %}
+            <a href="{{ extension_download_path }}" class="cta-button">
+                <i class="fas fa-download"></i> دانلود آخرین فایل افزونه
+            </a>
+        {% else %}
+            <button class="cta-button disabled-button" disabled>
+                <i class="fas fa-exclamation-circle"></i> فایل افزونه هنوز آپلود نشده است
+            </button>
+        {% endif %}
+
+        <div class="links-section">
+            <a href="/login"><i class="fas fa-user-lock"></i> ورود به پنل مدیریت</a>
+            <span>|</span>
+            <a href="/ping"><i class="fas fa-code"></i> وضعیت API (Ping)</a>
+        </div>
+    </div>
+</body>
+</html>
