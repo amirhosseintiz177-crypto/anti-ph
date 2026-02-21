@@ -5,3 +5,26 @@ services:
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn server_modular:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PHISH_SECRET_KEY
+        generateValue: true
+      - key: PHISH_MONGO_URI
+        sync: false
+      - key: PHISH_DB_NAME
+        value: phishguard
+      - key: PHISH_DATA_DIR
+        value: /var/data
+      - key: PHISH_RATE_CHECK_PER_MIN
+        value: "120"
+      - key: PHISH_RATE_BATCH_PER_MIN
+        value: "40"
+      - key: PHISH_RATE_LOGIN_PER_5MIN
+        value: "15"
+      - key: PHISH_MAX_BATCH_ITEMS
+        value: "40"
+      - key: PHISH_CHECK_BATCH_CONCURRENCY
+        value: "8"
+      - key: PHISH_THREAT_FEEDS
+        value: https://raw.githubusercontent.com/openphish/public_feed/refs/heads/main/feed.txt
+      - key: PHISH_GSB_API_KEY
+        sync: false
