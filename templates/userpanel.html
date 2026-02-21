@@ -152,6 +152,7 @@
     <div class="stats">
       <div class="chip">کاربر: <b>{{ admin_display_name }}</b></div>
       <div class="chip">رنک: <b>{{ user_rank }}</b></div>
+      <div class="chip">Team: <b>{{ user_team }}</b></div>
       <div class="chip">Whitelist: <b>{{ user_trusted|length }}</b></div>
       <div class="chip">Blacklist: <b>{{ user_blacklist|length }}</b></div>
       <div class="chip">Temp Trust: <b>{{ temp_user_trusted|length }}</b></div>
@@ -168,6 +169,7 @@
       {% if caps.panel.domains_tab %}
       <button class="tab-btn" data-tab="domains">دامنه‌ها</button>
       {% endif %}
+      <button class="tab-btn" data-tab="intel">Intel</button>
       <button class="tab-btn" data-tab="logs">لاگ‌ها</button>
     </div>
 
@@ -205,6 +207,8 @@
           <h3>خلاصه کاربر</h3>
           <table>
             <tr><th>Trusted جهانی</th><td>{{ "{:,}".format(trusted_count | int) }}</td></tr>
+            <tr><th>Team</th><td>{{ user_team }}</td></tr>
+            <tr><th>Policy Offset</th><td>{{ team_policy.get(user_team, 0) }}</td></tr>
             <tr><th>قابلیت Scan File</th><td>{{ "فعال" if caps.panel.scan_file else "غیرفعال" }}</td></tr>
             <tr><th>قابلیت Export</th><td>{{ "فعال" if caps.panel.export_history else "غیرفعال" }}</td></tr>
             <tr><th>قابلیت Blacklist Manage</th><td>{{ "فعال" if caps.panel.blacklist_manage else "غیرفعال" }}</td></tr>
@@ -344,6 +348,41 @@
     </section>
     {% endif %}
 
+    <section id="intel" class="tab">
+      <div class="grid-2">
+        <div class="card">
+          <h3>Domain Intel</h3>
+          <div class="row">
+            <input type="text" id="intelDomain" placeholder="domain.com">
+            <button class="btn" id="intelCheckBtn" type="button">Analyze Domain</button>
+          </div>
+          <div id="intelSummary" class="muted" style="margin-top: 8px;">-</div>
+          <table id="intelTimelineTable" style="margin-top: 8px;">
+            <thead><tr><th>زمان</th><th>Risk</th><th>Status</th><th>Reason</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card">
+          <h3>Inbox Guardian</h3>
+          <textarea id="guardianUrls" placeholder="one url per line"></textarea>
+          <div class="row">
+            <button class="btn" id="guardianScanBtn" type="button">Scan URLs</button>
+          </div>
+          <table id="guardianTable" style="margin-top: 8px;">
+            <thead><tr><th>Domain</th><th>Risk</th><th>Severity</th><th>Action</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Security Training Links</h3>
+        <table id="honeyLinksTable">
+          <thead><tr><th>Token</th><th>Label</th><th>Link</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
     <section id="logs" class="tab">
       <div class="card">
         <h3>آخرین گزارش‌ها</h3>
@@ -468,6 +507,89 @@
             <td class="mono">${esc(row.domain)}</td>
             <td>${Number(row.probability || 0)}%</td>
             <td>${esc(reason)}</td>
+          </tr>`;
+        });
+      } catch (_e) {}
+    }
+
+    async function runDomainIntel() {
+      const domain = document.getElementById('intelDomain')?.value.trim();
+      const summary = document.getElementById('intelSummary');
+      const body = document.querySelector('#intelTimelineTable tbody');
+      if (!domain || !summary || !body) return;
+
+      summary.textContent = 'Loading...';
+      body.innerHTML = '';
+      try {
+        const [timelineResp, fpResp] = await Promise.all([
+          fetch(`/api/domain_timeline?domain=${encodeURIComponent(domain)}&hours=168`),
+          fetch(`/api/domain_fingerprint?domain=${encodeURIComponent(domain)}`),
+        ]);
+
+        const timelineData = await timelineResp.json();
+        const fpData = await fpResp.json();
+        if (!timelineResp.ok) {
+          summary.textContent = timelineData.error || 'domain timeline failed';
+          return;
+        }
+
+        const points = timelineData.points || [];
+        summary.textContent =
+          `Points: ${points.length} | Trend: ${Number(timelineData.trend_delta || 0)} | Volatility: ${Number(timelineData.volatility || 0)}`
+          + (fpData && fpData.found ? ` | Drift: ${Number(fpData.state?.drift_count || 0)}` : ' | Fingerprint: new');
+
+        points.slice(-50).reverse().forEach((p) => {
+          body.innerHTML += `<tr>
+            <td>${esc(p.time || '-')}</td>
+            <td>${Number(p.probability || 0)}%</td>
+            <td>${p.is_phishing ? '<span class="badge danger">PHISHING</span>' : '<span class="badge ok">SAFE</span>'}</td>
+            <td>${esc(p.reason || '-')}</td>
+          </tr>`;
+        });
+      } catch (_e) {
+        summary.textContent = 'network error';
+      }
+    }
+
+    async function runInboxGuardian() {
+      const raw = document.getElementById('guardianUrls')?.value || '';
+      const body = document.querySelector('#guardianTable tbody');
+      if (!body) return;
+      const urls = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      if (!urls.length) return;
+      body.innerHTML = '';
+      try {
+        const resp = await fetch('/api/inbox_guardian_scan', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({urls}),
+        });
+        const data = await resp.json();
+        if (!resp.ok) return;
+        (data.results || []).forEach((row) => {
+          body.innerHTML += `<tr>
+            <td class="mono">${esc(row.domain || '-')}</td>
+            <td>${Number(row.probability || 0)}%</td>
+            <td>${esc(row.severity || '-')}</td>
+            <td>${esc(row.recommended_action || '-')}</td>
+          </tr>`;
+        });
+      } catch (_e) {}
+    }
+
+    async function refreshHoneyLinks() {
+      const body = document.querySelector('#honeyLinksTable tbody');
+      if (!body) return;
+      try {
+        const resp = await fetch('/api/honey_links');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        body.innerHTML = '';
+        (data.links || []).forEach((row) => {
+          body.innerHTML += `<tr>
+            <td class="mono">${esc(row.token || '-')}</td>
+            <td>${esc(row.label || '-')}</td>
+            <td class="mono"><a href="${esc(row.url || '#')}" target="_blank">${esc(row.url || '-')}</a></td>
           </tr>`;
         });
       } catch (_e) {}
@@ -615,6 +737,8 @@
       if (file) doScanFile(file);
     });
     document.getElementById('refreshHistoryBtn')?.addEventListener('click', loadScanHistory);
+    document.getElementById('intelCheckBtn')?.addEventListener('click', runDomainIntel);
+    document.getElementById('guardianScanBtn')?.addEventListener('click', runInboxGuardian);
 
     const dropZone = document.getElementById('dropZone');
     if (dropZone) {
@@ -661,8 +785,10 @@
     refreshTempTrust();
     refreshLiveReports();
     loadScanHistory();
+    refreshHoneyLinks();
     setInterval(fetchSummary, 20000);
     setInterval(refreshLiveReports, 15000);
+    setInterval(refreshHoneyLinks, 45000);
   </script>
 </body>
 </html>
