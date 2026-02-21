@@ -120,6 +120,14 @@ THREAT_FEED_SOURCE_LIST = list(dict.fromkeys(DEFAULT_THREAT_FEED_SOURCES + EXTRA
 
 RANKS = ["basic", "plus", "pro"]
 DEFAULT_RANK = "basic"
+TEAMS = ["general", "finance", "hr", "it"]
+DEFAULT_TEAM = "general"
+TEAM_SENSITIVITY_OFFSET = {
+    "general": 0,
+    "finance": 6,
+    "hr": 3,
+    "it": 2,
+}
 RANK_CAPS = {
     "basic": {
         "extension": {
@@ -265,6 +273,12 @@ def _normalize_rank(rank: Optional[str]) -> str:
         return DEFAULT_RANK
     rank = rank.strip().lower()
     return rank if rank in RANK_CAPS else DEFAULT_RANK
+
+def _normalize_team(team: Optional[str]) -> str:
+    if not team:
+        return DEFAULT_TEAM
+    team = str(team).strip().lower()
+    return team if team in TEAM_SENSITIVITY_OFFSET else DEFAULT_TEAM
 
 def _get_caps_for_session(session: dict) -> Dict[str, Any]:
     rank = "admin" if session.get("is_admin") else _normalize_rank(session.get("rank"))
@@ -463,6 +477,26 @@ def _short_reason(reasons: List[str]) -> str:
         return "Brand impersonation pattern"
     return reasons[0]
 
+def _levenshtein_distance(a: str, b: str) -> int:
+    a = a or ""
+    b = b or ""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        curr = [i]
+        for j, cb in enumerate(b, start=1):
+            ins = curr[j - 1] + 1
+            dele = prev[j] + 1
+            repl = prev[j - 1] + (0 if ca == cb else 1)
+            curr.append(min(ins, dele, repl))
+        prev = curr
+    return prev[-1]
+
 async def _redirect_chain(url: str, max_hops: int = 8) -> List[str]:
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
@@ -545,6 +579,7 @@ class MongoStore:
                 "password": "123",
                 "display_name": "Normal User",
                 "rank": DEFAULT_RANK,
+                "team": DEFAULT_TEAM,
             })
 
         await self.settings.update_one(
@@ -572,6 +607,16 @@ class MongoStore:
             {"$setOnInsert": {"value": {}}},
             upsert=True,
         )
+        await self.settings.update_one(
+            {"_id": "feedback_domain_bias"},
+            {"$setOnInsert": {"value": {}}},
+            upsert=True,
+        )
+        await self.settings.update_one(
+            {"_id": "honey_tokens"},
+            {"$setOnInsert": {"value": []}},
+            upsert=True,
+        )
         await self.audit_logs.create_index([("time", -1)])
         await self.feedback.create_index([("time", -1)])
         await self.feedback.create_index([("domain", 1)])
@@ -584,10 +629,17 @@ class MongoStore:
         async for doc in cursor:
             current = doc.get("rank")
             normalized = _normalize_rank(current)
+            team_current = doc.get("team")
+            normalized_team = _normalize_team(team_current)
+            updates = {}
             if current != normalized:
+                updates["rank"] = normalized
+            if team_current != normalized_team:
+                updates["team"] = normalized_team
+            if updates:
                 await self.normal_users.update_one(
                     {"_id": doc["_id"]},
-                    {"$set": {"rank": normalized}},
+                    {"$set": updates},
                 )
 
     async def get_admin_user(self, username: str) -> Optional[Dict[str, Any]]:
@@ -612,6 +664,7 @@ class MongoStore:
                 "password": doc.get("password", ""),
                 "display_name": doc.get("display_name", doc["_id"]),
                 "rank": _normalize_rank(doc.get("rank")),
+                "team": _normalize_team(doc.get("team")),
             }
         return users
 
@@ -633,7 +686,7 @@ class MongoStore:
     async def admin_count(self) -> int:
         return await self.admin_users.count_documents({})
 
-    async def add_normal_user(self, username: str, password: str, display_name: str, rank: str) -> bool:
+    async def add_normal_user(self, username: str, password: str, display_name: str, rank: str, team: str = DEFAULT_TEAM) -> bool:
         existing = await self.get_normal_user(username)
         if existing:
             return False
@@ -642,6 +695,7 @@ class MongoStore:
             "password": password,
             "display_name": display_name,
             "rank": _normalize_rank(rank),
+            "team": _normalize_team(team),
         })
         return True
 
@@ -653,6 +707,13 @@ class MongoStore:
         result = await self.normal_users.update_one(
             {"_id": username},
             {"$set": {"rank": _normalize_rank(rank)}},
+        )
+        return result.matched_count > 0
+
+    async def update_normal_user_team(self, username: str, team: str) -> bool:
+        result = await self.normal_users.update_one(
+            {"_id": username},
+            {"$set": {"team": _normalize_team(team)}},
         )
         return result.matched_count > 0
 
@@ -693,6 +754,20 @@ class MongoStore:
 
     async def set_rank_caps_overrides(self, value: Dict[str, Any]):
         await self.set_setting("rank_caps_overrides", value)
+
+    async def get_feedback_domain_bias(self) -> Dict[str, Any]:
+        value = await self.get_setting("feedback_domain_bias", {})
+        return value if isinstance(value, dict) else {}
+
+    async def set_feedback_domain_bias(self, value: Dict[str, Any]):
+        await self.set_setting("feedback_domain_bias", value)
+
+    async def get_honey_tokens(self) -> List[Dict[str, Any]]:
+        value = await self.get_setting("honey_tokens", [])
+        return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []
+
+    async def set_honey_tokens(self, rows: List[Dict[str, Any]]):
+        await self.set_setting("honey_tokens", rows)
 
     async def get_extension_filename(self) -> Optional[str]:
         return await self.get_setting("extension_filename", None)
@@ -865,6 +940,7 @@ class PhishDetector:
         # Synchronization Primitives
         self.list_lock = threading.RLock() # --- MODIFIED --- Use RLock for trusted/blacklist
         self.reports_lock = threading.Lock()
+        self.timeline_lock = threading.Lock()
         self.sensitivity_lock = threading.RLock() # Keep RLock for sensitivity
         self.health_lock = threading.Lock()
         self.result_cache_lock = threading.Lock()
@@ -878,6 +954,11 @@ class PhishDetector:
         # --- NEW --- Blacklist store
         self.user_blacklist: Set[str] = set()
         self.reports: List[Dict[str, Any]] = []
+        self.domain_timeline: Dict[str, List[Dict[str, Any]]] = {}
+        self.domain_fingerprints: Dict[str, Dict[str, Any]] = {}
+        self.honey_events: List[Dict[str, Any]] = []
+        self.honey_tokens: Dict[str, Dict[str, Any]] = {}
+        self.feedback_domain_bias: Dict[str, Dict[str, int]] = {}
         self.scan_history_lock = threading.Lock()
         self.scan_history: List[Dict[str, Any]] = []
         self.server_sensitivity = 90 # Default sensitivity, overridden by Mongo
@@ -1289,6 +1370,11 @@ class PhishDetector:
         self.user_trusted = set()
         self.user_blacklist = set()
         self.temp_user_trusted = {}
+        self.feedback_domain_bias = {}
+        self.domain_timeline = {}
+        self.domain_fingerprints = {}
+        self.honey_events = []
+        self.honey_tokens = {}
         self.trusted_global = self._load_json_set(self.TRUSTED_CACHE)
         self._rebuild_global_index()
         self._clear_result_cache()
@@ -1299,6 +1385,8 @@ class PhishDetector:
         trusted = await store.get_list("user_trusted")
         blacklist = await store.get_list("user_blacklist")
         temp_trusted_rows = await store.get_temp_trusted_rows()
+        feedback_bias_raw = await store.get_feedback_domain_bias()
+        honey_rows = await store.get_honey_tokens()
         self.user_trusted = set(self._normalize_host(d) for d in trusted if self._normalize_host(d))
         self.user_blacklist = set(self._normalize_host(d) for d in blacklist if self._normalize_host(d))
         temp_map: Dict[str, Dict[str, Any]] = {}
@@ -1319,6 +1407,32 @@ class PhishDetector:
         self.temp_user_trusted = temp_map
         self.extension_filename = await store.get_extension_filename()
         self.server_sensitivity = await store.get_server_sensitivity(self.server_sensitivity)
+        bias_map: Dict[str, Dict[str, int]] = {}
+        if isinstance(feedback_bias_raw, dict):
+            for host, row in feedback_bias_raw.items():
+                norm = self._normalize_host(str(host))
+                if not norm or not isinstance(row, dict):
+                    continue
+                bias_map[norm] = {
+                    "fp": int(row.get("fp", 0) or 0),
+                    "fn": int(row.get("fn", 0) or 0),
+                }
+        self.feedback_domain_bias = bias_map
+
+        tokens: Dict[str, Dict[str, Any]] = {}
+        for row in honey_rows:
+            token = str(row.get("token", "")).strip()
+            if not token:
+                continue
+            tokens[token] = {
+                "token": token,
+                "label": str(row.get("label", "training")).strip()[:80],
+                "created_by": str(row.get("created_by", ""))[:64],
+                "created_at": str(row.get("created_at", _now_str())),
+                "hits": int(row.get("hits", 0) or 0),
+                "last_hit": str(row.get("last_hit", "")),
+            }
+        self.honey_tokens = tokens
         self._clear_result_cache()
         print(
             f"Mongo load: {len(self.user_trusted)} trusted, {len(self.user_blacklist)} blacklisted, "
@@ -1642,8 +1756,14 @@ class PhishDetector:
         with self.reports_lock: return self.reports[:limit]
 
     def add_report(self, url: str, domain: str, probability: int, similar_to: Optional[str], reasons: List[str]):
-        report = {"url": url, "domain": domain, "probability": probability, "similar_to": similar_to, "reasons": reasons, "time": time.strftime("%Y-%m-%d %H:%M:%S")}
+        report = {"url": url, "domain": domain, "probability": probability, "similar_to": similar_to, "reasons": reasons, "time": _now_str()}
         with self.reports_lock: self.reports.insert(0, report); self.reports = self.reports[:1000] # Keep max 1000 reports
+        self._append_domain_timeline(
+            domain,
+            probability=int(probability or 0),
+            is_phishing=True,
+            reason=(reasons[0] if reasons else "report"),
+        )
 
     def add_scan_history(self, entry: Dict[str, Any]):
         with self.scan_history_lock:
@@ -1653,6 +1773,249 @@ class PhishDetector:
     def get_scan_history(self, limit: int = 200) -> List[Dict[str, Any]]:
         with self.scan_history_lock:
             return self.scan_history[:limit]
+
+    def _fingerprint_signature(self, fp: Dict[str, Any]) -> str:
+        keys = [
+            "scheme", "tld", "subdomain_count", "has_ip", "has_punycode",
+            "has_unicode", "has_userinfo", "keyword_hits", "port", "path_depth",
+        ]
+        values = [str(fp.get(k, "")) for k in keys]
+        return "|".join(values)
+
+    def _build_domain_fingerprint(self, target_url: str, host: str, indicators: List[str]) -> Dict[str, Any]:
+        normalized_url = _normalize_url_for_parse(target_url)
+        parsed = urllib.parse.urlparse(normalized_url)
+        labels = [p for p in (host or "").split(".") if p]
+        path = parsed.path or ""
+        path_tokens = [p for p in path.split("/") if p]
+        fp = {
+            "scheme": (parsed.scheme or "").lower(),
+            "tld": labels[-1] if labels else "",
+            "subdomain_count": max(0, len(labels) - 2),
+            "host_len": len(host or ""),
+            "sld_len": len(self._extract_sld(host or "")),
+            "has_ip": int("IP address in URL" in indicators),
+            "has_punycode": int("Punycode domain" in indicators),
+            "has_unicode": int("Unicode in domain" in indicators),
+            "has_userinfo": int("Userinfo (@) in URL" in indicators),
+            "keyword_hits": sum(1 for k in SUSPICIOUS_KEYWORDS if k in normalized_url.lower()),
+            "port": parsed.port or (443 if parsed.scheme == "https" else 80),
+            "path_depth": len(path_tokens),
+        }
+        return fp
+
+    def _update_domain_fingerprint(self, host: str, fingerprint: Dict[str, Any]) -> Dict[str, Any]:
+        sig = self._fingerprint_signature(fingerprint)
+        now = _now_str()
+        with self.timeline_lock:
+            prev = self.domain_fingerprints.get(host)
+            if not prev:
+                state = {
+                    "host": host,
+                    "signature": sig,
+                    "fingerprint": fingerprint,
+                    "first_seen": now,
+                    "last_seen": now,
+                    "drift_count": 0,
+                    "last_drift_at": None,
+                }
+                self.domain_fingerprints[host] = state
+                return {"drifted": False, "drift_score": 0, "state": state}
+
+            drifted = prev.get("signature") != sig
+            drift_count = int(prev.get("drift_count", 0))
+            drift_score = 0
+            if drifted:
+                drift_count += 1
+                drift_score = min(18, 6 + min(12, drift_count * 2))
+                prev["last_drift_at"] = now
+            prev["signature"] = sig
+            prev["fingerprint"] = fingerprint
+            prev["last_seen"] = now
+            prev["drift_count"] = drift_count
+            return {"drifted": drifted, "drift_score": drift_score, "state": prev}
+
+    def _append_domain_timeline(self, host: str, probability: int, is_phishing: bool, reason: str):
+        if not host:
+            return
+        entry = {
+            "time": _now_str(),
+            "probability": int(max(0, min(100, probability))),
+            "is_phishing": bool(is_phishing),
+            "reason": reason[:120] if reason else "",
+        }
+        with self.timeline_lock:
+            rows = self.domain_timeline.setdefault(host, [])
+            rows.append(entry)
+            if len(rows) > 720:
+                self.domain_timeline[host] = rows[-720:]
+
+    def get_domain_timeline(self, host: str, hours: int = 168, limit: int = 300) -> List[Dict[str, Any]]:
+        host = self._normalize_host(host)
+        if not host:
+            return []
+        cutoff = datetime.utcnow() - timedelta(hours=max(1, min(hours, 24 * 30)))
+        with self.timeline_lock:
+            rows = list(self.domain_timeline.get(host, []))
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            dt = _parse_time(str(row.get("time", "")))
+            if dt and dt < cutoff:
+                continue
+            out.append(row)
+        return out[-max(5, min(limit, 1000)):]
+
+    def get_fingerprint_state(self, host: str) -> Optional[Dict[str, Any]]:
+        host = self._normalize_host(host)
+        if not host:
+            return None
+        with self.timeline_lock:
+            state = self.domain_fingerprints.get(host)
+            return copy.deepcopy(state) if state else None
+
+    def get_campaign_clusters(self, hours: int = 72, min_size: int = 2) -> List[Dict[str, Any]]:
+        cutoff = datetime.utcnow() - timedelta(hours=max(1, min(hours, 24 * 14)))
+        with self.reports_lock:
+            rows = list(self.reports[:2000])
+        clusters: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            dt = _parse_time(str(row.get("time", "")))
+            if dt and dt < cutoff:
+                continue
+            domain = self._normalize_host(str(row.get("domain", "")))
+            if not domain:
+                continue
+            tld = self._extract_tld(domain)
+            reasons = " ".join(str(x).lower() for x in row.get("reasons", [])[:4])
+            keyword = "generic"
+            for k in sorted(SUSPICIOUS_KEYWORDS):
+                if k in domain or k in reasons:
+                    keyword = k
+                    break
+            similar = self._normalize_host(str(row.get("similar_to") or ""))
+            key = f"{tld}|{keyword}|{similar or '-'}"
+            c = clusters.setdefault(key, {
+                "cluster_id": key,
+                "tld": tld,
+                "keyword": keyword,
+                "similar_to": similar or None,
+                "count": 0,
+                "max_probability": 0,
+                "domains": set(),
+                "last_seen": row.get("time", ""),
+            })
+            c["count"] += 1
+            c["max_probability"] = max(c["max_probability"], int(row.get("probability", 0) or 0))
+            c["domains"].add(domain)
+            c["last_seen"] = row.get("time", c["last_seen"])
+
+        out: List[Dict[str, Any]] = []
+        for c in clusters.values():
+            if c["count"] < max(2, min_size):
+                continue
+            out.append({
+                "cluster_id": c["cluster_id"],
+                "tld": c["tld"],
+                "keyword": c["keyword"],
+                "similar_to": c["similar_to"],
+                "count": c["count"],
+                "max_probability": c["max_probability"],
+                "domains": sorted(list(c["domains"]))[:20],
+                "last_seen": c["last_seen"],
+            })
+        out.sort(key=lambda x: (x["count"], x["max_probability"]), reverse=True)
+        return out[:40]
+
+    def get_feedback_bias(self, host: str) -> Dict[str, int]:
+        host = self._normalize_host(host)
+        if not host:
+            return {"fp": 0, "fn": 0}
+        with self.timeline_lock:
+            direct = self.feedback_domain_bias.get(host)
+            if direct:
+                return {"fp": int(direct.get("fp", 0)), "fn": int(direct.get("fn", 0))}
+            labels = [p for p in host.split(".") if p]
+            for i in range(1, len(labels) - 1):
+                parent = ".".join(labels[i:])
+                d = self.feedback_domain_bias.get(parent)
+                if d:
+                    return {"fp": int(d.get("fp", 0)), "fn": int(d.get("fn", 0))}
+        return {"fp": 0, "fn": 0}
+
+    def apply_feedback_bias(self, host: str, probability: int) -> Tuple[int, str]:
+        bias = self.get_feedback_bias(host)
+        fp = int(bias.get("fp", 0))
+        fn = int(bias.get("fn", 0))
+        adjustment = 0
+        if fp > fn and fp >= 3:
+            adjustment = -min(16, 2 + (fp - fn) * 2)
+        elif fn > fp and fn >= 2:
+            adjustment = min(18, 3 + (fn - fp) * 2)
+        adjusted = int(max(0, min(100, int(probability) + adjustment)))
+        note = ""
+        if adjustment != 0:
+            note = f"Feedback Bias: {adjustment:+d}% (fp={fp}, fn={fn})"
+        return adjusted, note
+
+    def _update_feedback_bias_from_feedback(self, row: Dict[str, Any]):
+        host = self._normalize_host(str(row.get("domain") or row.get("url") or ""))
+        if not host:
+            return
+        label = str(row.get("label", "")).strip().lower()
+        pred_is_phish = bool(row.get("predicted_is_phishing", False))
+        with self.timeline_lock:
+            bias = self.feedback_domain_bias.setdefault(host, {"fp": 0, "fn": 0})
+            if label == "not_phishing" and pred_is_phish:
+                bias["fp"] = int(bias.get("fp", 0)) + 1
+            elif label == "phishing" and not pred_is_phish:
+                bias["fn"] = int(bias.get("fn", 0)) + 1
+
+    def get_honey_tokens_list(self) -> List[Dict[str, Any]]:
+        with self.timeline_lock:
+            rows = [copy.deepcopy(v) for v in self.honey_tokens.values()]
+        rows.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        return rows[:200]
+
+    async def create_honey_token(self, created_by: str, label: str = "training") -> Dict[str, Any]:
+        token = uuid.uuid4().hex[:16]
+        row = {
+            "token": token,
+            "label": (label or "training")[:80],
+            "created_by": (created_by or "")[:64],
+            "created_at": _now_str(),
+            "hits": 0,
+            "last_hit": "",
+        }
+        with self.timeline_lock:
+            self.honey_tokens[token] = row
+        if self.store:
+            await self.store.set_honey_tokens(self.get_honey_tokens_list())
+        return row
+
+    async def mark_honey_hit(self, token: str, source: str, ip: str):
+        token = str(token or "").strip()
+        if not token:
+            return
+        now = _now_str()
+        with self.timeline_lock:
+            row = self.honey_tokens.get(token)
+            if row:
+                row["hits"] = int(row.get("hits", 0)) + 1
+                row["last_hit"] = now
+            self.honey_events.insert(0, {
+                "time": now,
+                "token": token,
+                "source": source[:120],
+                "ip": ip,
+                "known_token": bool(row),
+            })
+            self.honey_events = self.honey_events[:1000]
+        if self.store and row:
+            await self.store.set_honey_tokens(self.get_honey_tokens_list())
+
+    def get_honey_events(self, limit: int = 300) -> List[Dict[str, Any]]:
+        with self.timeline_lock:
+            return list(self.honey_events[:max(1, min(limit, 2000))])
 
     def get_dashboard_metrics(self, hours: int = 24) -> Dict[str, Any]:
         now = datetime.utcnow()
@@ -1730,7 +2093,13 @@ class PhishDetector:
     # ######################################
     
     # --- Main Detector Logic (MODIFIED FOR PRECISION) ---
-    async def check_link(self, target_url: str, user_sensitivity: Optional[int] = None, lite: bool = False) -> Dict[str, Any]:
+    async def check_link(
+        self,
+        target_url: str,
+        user_sensitivity: Optional[int] = None,
+        lite: bool = False,
+        user_team: Optional[str] = None,
+    ) -> Dict[str, Any]:
         target_host = self._normalize_host(target_url)
         if not target_host:
             invalid = {"is_phishing": False, "domain": "", "probability": 0, "reasons": ["Invalid host"], "indicators": []}
@@ -1741,6 +2110,8 @@ class PhishDetector:
         except Exception:
             effective_sensitivity = int(self.server_sensitivity)
         effective_sensitivity = max(50, min(100, effective_sensitivity))
+        team = _normalize_team(user_team)
+        effective_sensitivity = max(50, min(100, effective_sensitivity + int(TEAM_SENSITIVITY_OFFSET.get(team, 0))))
         # Higher sensitivity lowers threshold, but keep enough margin to reduce false positives.
         phish_threshold = int(round(max(58, min(92, 110 - (effective_sensitivity * 0.5)))))
 
@@ -1773,6 +2144,7 @@ class PhishDetector:
                 "indicators": [],
                 "sensitivity": effective_sensitivity,
                 "user_sensitivity": user_sensitivity,
+                "team": team,
                 "threshold": phish_threshold,
             }
             self.add_report(target_url, target_host, 100, "N/A", ["Force blocked by blacklist"])
@@ -1789,6 +2161,7 @@ class PhishDetector:
                 "indicators": [],
                 "sensitivity": effective_sensitivity,
                 "user_sensitivity": user_sensitivity,
+                "team": team,
                 "threshold": phish_threshold,
             }
             self.add_report(target_url, target_host, 99, "N/A", threat_hit["reasons"])
@@ -1805,6 +2178,7 @@ class PhishDetector:
                 "indicators": [],
                 "sensitivity": effective_sensitivity,
                 "user_sensitivity": user_sensitivity,
+                "team": team,
                 "threshold": phish_threshold,
             }
             self._cache_set(cache_key, trusted_result)
@@ -1820,6 +2194,7 @@ class PhishDetector:
                 "indicators": [],
                 "sensitivity": effective_sensitivity,
                 "user_sensitivity": user_sensitivity,
+                "team": team,
                 "threshold": phish_threshold,
             }
             self._cache_set(cache_key, trusted_temp)
@@ -1828,6 +2203,7 @@ class PhishDetector:
         scoring_indicators = _url_indicators(target_url, target_host)
         indicators = [] if lite else list(scoring_indicators)
         heuristic_risk = self._heuristic_risk(target_url, target_host, scoring_indicators)
+        fingerprint = self._build_domain_fingerprint(target_url, target_host, scoring_indicators)
         candidates = self._candidate_domains(target_host)
         brand_boost, brand_like_domain = self._brand_injection_signal(target_host, candidates)
 
@@ -1910,6 +2286,20 @@ class PhishDetector:
                 _blocking_check, effective_sensitivity, phish_threshold, heuristic_risk, brand_boost, brand_like_domain
             )
 
+            fp_state = self._update_domain_fingerprint(target_host, fingerprint)
+            drift_score = int(fp_state.get("drift_score", 0) or 0)
+            if drift_score > 0:
+                probability = max(0, min(100, int(probability) + drift_score))
+                if not lite:
+                    reasons.append(
+                        f"Fingerprint Drift: +{drift_score}% (changes={fp_state['state'].get('drift_count', 0)})"
+                    )
+
+            probability, bias_note = self.apply_feedback_bias(target_host, probability)
+            if bias_note and not lite:
+                reasons.append(bias_note)
+            is_phishing = bool(probability >= phish_threshold)
+
             # Optional high-confidence external check for borderline suspicious URLs.
             if (not lite) and (not is_phishing) and probability >= max(35, phish_threshold - 8):
                 gsb_result = await self._check_google_safe_browsing(target_url)
@@ -1930,11 +2320,25 @@ class PhishDetector:
                 "indicators": indicators,
                 "sensitivity": effective_sensitivity,
                 "user_sensitivity": user_sensitivity,
+                "team": team,
                 "threshold": phish_threshold,
             }
+            if not lite:
+                full_result["fingerprint"] = fingerprint
+                full_result["fingerprint_state"] = {
+                    "drift_count": fp_state["state"].get("drift_count", 0),
+                    "last_drift_at": fp_state["state"].get("last_drift_at"),
+                }
 
             if is_phishing:
                 self.add_report(target_url, target_host, probability, most_similar_trusted, reasons or [f"Risk Score: {probability}%"])
+            elif probability >= 25:
+                self._append_domain_timeline(
+                    target_host,
+                    probability=int(probability),
+                    is_phishing=False,
+                    reason=(reasons[0] if reasons else "risk"),
+                )
 
             self._cache_set(cache_key, full_result)
             return self._to_lite_result(full_result) if lite else full_result
@@ -2056,11 +2460,12 @@ async def check_link_api(request: Request):
         data = await request.json()
         url = data.get("url")
         user_sensitivity = data.get("user_sensitivity")
+        user_team = data.get("user_team")
         lite = bool(data.get("lite", False))
     except Exception: return JSONResponse({"error": "Invalid JSON"}, status_code=400)
     if not url: return JSONResponse({"error": "URL not provided"}, status_code=400)
     try:
-        result = await detector.check_link(url, user_sensitivity, lite=lite)
+        result = await detector.check_link(url, user_sensitivity, lite=lite, user_team=user_team)
         return JSONResponse(result)
     except HTTPException as he:
         return JSONResponse(he.detail, status_code=he.status_code, headers=getattr(he, "headers", None))
@@ -2075,6 +2480,7 @@ async def check_batch_api(request: Request):
 
     items = data.get("items")
     default_sensitivity = data.get("user_sensitivity")
+    default_team = data.get("user_team")
     lite = bool(data.get("lite", False))
 
     if not isinstance(items, list) or not items:
@@ -2090,8 +2496,9 @@ async def check_batch_api(request: Request):
         if not url:
             return {"is_phishing": False, "domain": "", "probability": 0, "error": "missing_url"}
         sensitivity = item.get("user_sensitivity", default_sensitivity) if isinstance(item, dict) else default_sensitivity
+        team = item.get("user_team", default_team) if isinstance(item, dict) else default_team
         async with sem:
-            return await detector.check_link(url, sensitivity, lite=lite)
+            return await detector.check_link(url, sensitivity, lite=lite, user_team=team)
 
     try:
         results = await asyncio.gather(*[_run_one(i) for i in items], return_exceptions=True)
@@ -2107,7 +2514,13 @@ async def check_batch_api(request: Request):
     except Exception:
         return JSONResponse({"error": "Internal batch error"}, status_code=500)
 
-async def _scan_links(text: str, include_redirects: bool, caps: Dict[str, Any], actor: str = "") -> Dict[str, Any]:
+async def _scan_links(
+    text: str,
+    include_redirects: bool,
+    caps: Dict[str, Any],
+    actor: str = "",
+    user_team: str = DEFAULT_TEAM,
+) -> Dict[str, Any]:
     if include_redirects and not caps.get("panel", {}).get("redirect_chain", False):
         include_redirects = False
 
@@ -2120,7 +2533,7 @@ async def _scan_links(text: str, include_redirects: bool, caps: Dict[str, Any], 
     async def _scan_one(url: str):
         try:
             async with semaphore:
-                res = await detector.check_link(url)
+                res = await detector.check_link(url, user_team=user_team)
             status = "PHISHING" if res.get("is_phishing") else "SAFE"
             short_reason = _short_reason(res.get("reasons", []))
             chain = await _redirect_chain(url) if include_redirects else []
@@ -2187,7 +2600,13 @@ async def api_scan_text(request: Request):
     if not caps.get("panel", {}).get("scan_text", False):
         return JSONResponse({"error": "Insufficient rank"}, status_code=403)
 
-    result = await _scan_links(text, include_redirects, caps, actor=request.session.get("username", ""))
+    result = await _scan_links(
+        text,
+        include_redirects,
+        caps,
+        actor=request.session.get("username", ""),
+        user_team=_normalize_team(request.session.get("team")),
+    )
     await _audit(request, "scan_text", meta={"links_found": result.get("links_found", 0)})
     return JSONResponse(result)
 
@@ -2210,7 +2629,13 @@ async def api_scan_file(request: Request, file: UploadFile = File(...), include_
     if not text:
         return JSONResponse({"error": "Unable to decode file"}, status_code=400)
 
-    result = await _scan_links(text, include_redirects, caps, actor=request.session.get("username", ""))
+    result = await _scan_links(
+        text,
+        include_redirects,
+        caps,
+        actor=request.session.get("username", ""),
+        user_team=_normalize_team(request.session.get("team")),
+    )
     await _audit(request, "scan_file", target=file.filename or "", meta={"links_found": result.get("links_found", 0)})
     return JSONResponse(result)
 
@@ -2276,6 +2701,9 @@ async def api_feedback(request: Request):
     feedback_id = payload["feedback_id"]
     if mongo_store:
         feedback_id = await mongo_store.add_feedback(payload)
+    detector._update_feedback_bias_from_feedback(payload)
+    if mongo_store:
+        await mongo_store.set_feedback_domain_bias(detector.feedback_domain_bias)
     await _audit(request, "feedback_submit", target=domain, meta={"label": label, "source": payload["source"]})
     return JSONResponse({"ok": True, "feedback_id": feedback_id})
 
@@ -2421,6 +2849,10 @@ async def api_add_temp_trusted(request: Request):
     except Exception:
         minutes = TEMP_TRUST_DEFAULT_MINUTES
     note = str(payload.get("note", "")).strip()
+    if len(note) < 4:
+        return JSONResponse({"error": "reason/note is required (min 4 chars)"}, status_code=400)
+    if minutes < TEMP_TRUST_MIN_MINUTES or minutes > TEMP_TRUST_MAX_MINUTES:
+        return JSONResponse({"error": f"minutes must be between {TEMP_TRUST_MIN_MINUTES} and {TEMP_TRUST_MAX_MINUTES}"}, status_code=400)
     ok = await detector.add_temp_user_trusted(
         host=site,
         minutes=minutes,
@@ -2568,6 +3000,272 @@ async def admin_export_iocs(include_threat_feed: bool = False, max_items: int = 
     headers = {"Content-Disposition": "attachment; filename=phishguard_iocs.csv"}
     return HTMLResponse(content=output.getvalue(), headers=headers, media_type="text/csv")
 
+@app.post("/admin/rebuild_feedback_bias", dependencies=[Depends(require_admin)])
+async def admin_rebuild_feedback_bias(request: Request, limit: int = 5000):
+    global mongo_store
+    if not mongo_store:
+        return JSONResponse({"error": "Database not configured"}, status_code=500)
+    rows = await mongo_store.get_feedback_recent(limit=max(100, min(limit, 20000)))
+    detector.feedback_domain_bias = {}
+    for row in rows:
+        detector._update_feedback_bias_from_feedback(row)
+    await mongo_store.set_feedback_domain_bias(detector.feedback_domain_bias)
+    await _audit(request, "rebuild_feedback_bias", meta={"rows": len(rows), "domains": len(detector.feedback_domain_bias)})
+    return JSONResponse({"ok": True, "rows": len(rows), "domains": len(detector.feedback_domain_bias)})
+
+@app.get("/api/domain_timeline", dependencies=[Depends(require_authenticated)])
+async def api_domain_timeline(request: Request, domain: str, hours: int = 168):
+    host = detector._normalize_host(domain)
+    if not host:
+        return JSONResponse({"error": "invalid domain"}, status_code=400)
+    points = detector.get_domain_timeline(host, hours=hours, limit=600)
+    recent_probs = [int(p.get("probability", 0) or 0) for p in points[-8:]]
+    trend = 0
+    if len(recent_probs) >= 2:
+        trend = recent_probs[-1] - recent_probs[0]
+    return JSONResponse({
+        "domain": host,
+        "points": points,
+        "trend_delta": trend,
+        "volatility": (max(recent_probs) - min(recent_probs)) if recent_probs else 0,
+    })
+
+@app.get("/api/domain_fingerprint", dependencies=[Depends(require_authenticated)])
+async def api_domain_fingerprint(request: Request, domain: str):
+    host = detector._normalize_host(domain)
+    if not host:
+        return JSONResponse({"error": "invalid domain"}, status_code=400)
+    state = detector.get_fingerprint_state(host)
+    if not state:
+        return JSONResponse({"domain": host, "found": False})
+    return JSONResponse({"domain": host, "found": True, "state": state})
+
+@app.get("/admin/campaigns", dependencies=[Depends(require_admin)])
+async def admin_campaigns(hours: int = 72, min_size: int = 2):
+    clusters = detector.get_campaign_clusters(hours=hours, min_size=min_size)
+    return JSONResponse({"clusters": clusters, "count": len(clusters)})
+
+@app.get("/admin/typosquat_hunt", dependencies=[Depends(require_admin)])
+async def admin_typosquat_hunt(brand: str, limit: int = 50):
+    brand_host = detector._normalize_host(brand)
+    if not brand_host:
+        return JSONResponse({"error": "invalid brand domain"}, status_code=400)
+    brand_sld = detector._extract_sld(brand_host)
+    if not brand_sld:
+        return JSONResponse({"error": "invalid brand domain"}, status_code=400)
+
+    candidates: Set[str] = set()
+    reports = detector.get_reports(limit=4000)
+    for r in reports:
+        d = detector._normalize_host(str(r.get("domain", "")))
+        if d:
+            candidates.add(d)
+    candidates.update(list(detector.user_blacklist)[:2000])
+    candidates.update(list(detector.threat_feed)[:5000])
+    candidates.discard(brand_host)
+
+    scored = []
+    for host in candidates:
+        sld = detector._extract_sld(host)
+        if not sld:
+            continue
+        sim = detector._similarity(brand_sld, sld)
+        dist = _levenshtein_distance(brand_sld, sld)
+        contains = brand_sld in sld or sld in brand_sld
+        if sim < 72 and dist > 2 and not contains:
+            continue
+        risk = 0
+        if host in detector.threat_feed:
+            risk += 35
+        if host in detector.user_blacklist:
+            risk += 25
+        if contains:
+            risk += 12
+        risk += max(0, sim - 70)
+        risk += max(0, 4 - dist) * 3
+        scored.append({
+            "domain": host,
+            "similarity": sim,
+            "distance": dist,
+            "contains_brand_token": bool(contains),
+            "risk": min(100, risk),
+            "in_threat_feed": host in detector.threat_feed,
+            "in_blacklist": host in detector.user_blacklist,
+        })
+    scored.sort(key=lambda x: (x["risk"], x["similarity"]), reverse=True)
+    return JSONResponse({"brand": brand_host, "items": scored[:max(5, min(limit, 200))]})
+
+@app.post("/admin/incident_playbook", dependencies=[Depends(require_admin)])
+async def admin_incident_playbook(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        form = await request.form()
+        data = dict(form)
+    target = str(data.get("domain") or data.get("url") or "").strip()
+    host = detector._normalize_host(target)
+    if not host:
+        return JSONResponse({"error": "domain/url is required"}, status_code=400)
+
+    blocked = await detector.add_user_blacklist(host)
+    timeline = detector.get_domain_timeline(host, hours=24 * 14, limit=120)
+    fingerprint = detector.get_fingerprint_state(host)
+    clusters = detector.get_campaign_clusters(hours=24 * 7, min_size=2)
+    related_clusters = [c for c in clusters if host in set(c.get("domains", []))]
+    ioc = {
+        "type": "incident_block",
+        "value": host,
+        "confidence": 100,
+        "count": len(timeline),
+        "last_seen": timeline[-1]["time"] if timeline else "",
+        "source": "incident_playbook",
+    }
+    await _audit(
+        request,
+        "incident_playbook",
+        target=host,
+        meta={"blocked": bool(blocked), "timeline_points": len(timeline), "related_clusters": len(related_clusters)},
+    )
+    return JSONResponse({
+        "ok": True,
+        "domain": host,
+        "blacklist_added": bool(blocked),
+        "timeline_points": len(timeline),
+        "fingerprint": fingerprint,
+        "related_clusters": related_clusters[:5],
+        "ioc": ioc,
+        "actions": [
+            "blacklist_applied",
+            "ioc_generated",
+            "audit_logged",
+        ],
+    })
+
+def _weekly_report_payload() -> Dict[str, Any]:
+    metrics = detector.get_dashboard_metrics(hours=24 * 7)
+    clusters = detector.get_campaign_clusters(hours=24 * 7, min_size=2)
+    return {
+        "generated_at": _now_str(),
+        "window_hours": 24 * 7,
+        "metrics": metrics,
+        "campaigns": clusters[:15],
+    }
+
+@app.get("/admin/weekly_report", dependencies=[Depends(require_admin)])
+async def admin_weekly_report():
+    return JSONResponse(_weekly_report_payload())
+
+@app.get("/admin/weekly_report.csv", dependencies=[Depends(require_admin)])
+async def admin_weekly_report_csv():
+    payload = _weekly_report_payload()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["metric", "value"])
+    m = payload.get("metrics", {})
+    writer.writerow(["generated_at", payload.get("generated_at", "")])
+    writer.writerow(["window_hours", payload.get("window_hours", 0)])
+    writer.writerow(["reports_count", m.get("reports_count", 0)])
+    writer.writerow(["scan_total", m.get("scan_total", 0)])
+    writer.writerow(["scan_phishing", m.get("scan_phishing", 0)])
+    writer.writerow(["scan_safe", m.get("scan_safe", 0)])
+    writer.writerow(["hit_rate_percent", m.get("hit_rate_percent", 0)])
+    writer.writerow([])
+    writer.writerow(["top_domain", "count"])
+    for row in m.get("top_domains", []):
+        writer.writerow([row.get("domain", ""), row.get("count", 0)])
+    writer.writerow([])
+    writer.writerow(["campaign_id", "count", "max_probability", "keyword", "tld", "similar_to"])
+    for c in payload.get("campaigns", []):
+        writer.writerow([
+            c.get("cluster_id", ""),
+            c.get("count", 0),
+            c.get("max_probability", 0),
+            c.get("keyword", ""),
+            c.get("tld", ""),
+            c.get("similar_to", ""),
+        ])
+    headers = {"Content-Disposition": "attachment; filename=phishguard_weekly_report.csv"}
+    return HTMLResponse(content=output.getvalue(), headers=headers, media_type="text/csv")
+
+@app.post("/admin/honey_tokens", dependencies=[Depends(require_admin)])
+async def admin_create_honey_token(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        form = await request.form()
+        data = dict(form)
+    label = str(data.get("label", "training")).strip()[:80]
+    row = await detector.create_honey_token(request.session.get("username", "admin"), label=label)
+    await _audit(request, "create_honey_token", target=row.get("token", ""), meta={"label": label})
+    return JSONResponse({"ok": True, "token": row})
+
+@app.get("/admin/honey_tokens", dependencies=[Depends(require_admin)])
+async def admin_honey_tokens():
+    return JSONResponse({"tokens": detector.get_honey_tokens_list(), "events": detector.get_honey_events(limit=300)})
+
+@app.get("/api/honey_links", dependencies=[Depends(require_authenticated)])
+async def api_honey_links(request: Request):
+    tokens = detector.get_honey_tokens_list()
+    if not tokens:
+        token_row = await detector.create_honey_token(request.session.get("username", "admin"), label="default-training")
+        tokens = [token_row]
+    base = str(request.base_url).rstrip("/")
+    links = [{"token": t.get("token"), "label": t.get("label"), "url": f"{base}/honey/{t.get('token')}"} for t in tokens[:20]]
+    return JSONResponse({"links": links})
+
+@app.get("/honey/{token}", response_class=HTMLResponse)
+async def honey_page(request: Request, token: str):
+    await detector.mark_honey_hit(token, source=request.headers.get("referer", "direct"), ip=_client_ip(request))
+    html = f"""
+    <!doctype html>
+    <html lang='fa' dir='rtl'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+    <title>Security Training</title>
+    <style>body{{font-family:tahoma;background:#0b1320;color:#eaf2ff;margin:0;padding:24px}}.box{{max-width:700px;margin:0 auto;background:#13203a;border:1px solid #294063;border-radius:12px;padding:20px}}a{{color:#37c0ff}}</style>
+    </head><body><div class='box'><h2>تمرین امنیتی</h2><p>این لینک یک Honey-Link آموزشی بود. اگر روی لینک مشکوک کلیک کردید، قبل از ادامه آدرس دامنه را بررسی کنید.</p><p>Token: <code>{token}</code></p><p><a href='/'>بازگشت</a></p></div></body></html>
+    """
+    return HTMLResponse(content=html)
+
+@app.post("/api/inbox_guardian_scan", dependencies=[Depends(require_authenticated)])
+async def api_inbox_guardian_scan(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    urls = data.get("urls", [])
+    if not isinstance(urls, list) or not urls:
+        return JSONResponse({"error": "urls must be a non-empty list"}, status_code=400)
+    urls = [str(u).strip() for u in urls if str(u).strip()]
+    urls = urls[:MAX_BATCH_ITEMS]
+    team = _normalize_team(request.session.get("team"))
+    sem = asyncio.Semaphore(max(2, CHECK_BATCH_CONCURRENCY))
+
+    async def _scan(u: str):
+        async with sem:
+            res = await detector.check_link(u, lite=True, user_team=team)
+        p = int(res.get("probability", 0) or 0)
+        if res.get("is_phishing"):
+            severity = "critical" if p >= 90 else "high"
+            action = "block_and_report"
+        elif p >= 45:
+            severity = "medium"
+            action = "review_before_click"
+        else:
+            severity = "low"
+            action = "allow"
+        return {
+            "url": u,
+            "domain": res.get("domain", ""),
+            "probability": p,
+            "is_phishing": bool(res.get("is_phishing")),
+            "severity": severity,
+            "recommended_action": action,
+        }
+
+    rows = await asyncio.gather(*[_scan(u) for u in urls], return_exceptions=False)
+    rows.sort(key=lambda x: (x["severity"] in ("critical", "high"), x["probability"]), reverse=True)
+    await _audit(request, "inbox_guardian_scan", meta={"count": len(rows)})
+    return JSONResponse({"count": len(rows), "results": rows})
+
 # --- Public Whitelist API (unchanged for now, admin handles this via form) ---
 @app.post("/add_trusted")
 async def add_trusted_api(request: Request):
@@ -2688,6 +3386,7 @@ async def login_post(request: Request, username: str = Form(...), password: str 
         request.session["username"] = username # Store username
         request.session["display_name"] = normal_user_data.get("display_name", username) # Store display name
         request.session["rank"] = _normalize_rank(normal_user_data.get("rank"))
+        request.session["team"] = _normalize_team(normal_user_data.get("team"))
         await _audit(request, "login_success_user", username)
         return RedirectResponse(url=app.url_path_for("user_panel"), status_code=status.HTTP_302_FOUND)
 
@@ -2717,6 +3416,7 @@ async def api_extension_login(request: Request):
     user_data = await mongo_store.get_normal_user(username)
     if user_data and user_data.get("password") == password:
         rank = _normalize_rank(user_data.get("rank"))
+        team = _normalize_team(user_data.get("team"))
         caps = _resolve_rank_caps(rank, is_admin=False)
         await mongo_store.add_audit_log(
             actor=f"extension:{username}",
@@ -2728,6 +3428,7 @@ async def api_extension_login(request: Request):
             "success": True,
             "displayName": user_data.get("display_name", username),
             "rank": rank,
+            "team": team,
             "isAdmin": False,
             "capabilities": caps,
         })
@@ -2745,6 +3446,7 @@ async def api_extension_login(request: Request):
             "success": True,
             "displayName": admin_data.get("display_name", username) + " (Admin)",
             "rank": "admin",
+            "team": "admin",
             "isAdmin": True,
             "capabilities": _resolve_rank_caps("admin", is_admin=True),
         })
@@ -2796,6 +3498,8 @@ async def admin(request: Request, admin_username: str = Depends(require_admin)):
         "all_normal_users": all_normal_users, # --- NEW --- Pass normal users
         "rank_caps_matrix": _get_rank_caps_matrix(),
         "rank_caps_overrides": RANK_CAPS_OVERRIDES,
+        "teams": TEAMS,
+        "team_policy": TEAM_SENSITIVITY_OFFSET,
     }
     return templates.TemplateResponse("admin.html", context)
 
@@ -2821,6 +3525,8 @@ async def user_panel(request: Request, session: dict = Depends(require_authentic
         "admin_display_name": session.get("display_name", session.get("username")), # Use display name
         "caps": caps,
         "user_rank": rank,
+        "user_team": _normalize_team(session.get("team")),
+        "team_policy": TEAM_SENSITIVITY_OFFSET,
         # Note: No system-level data like users or extension files is passed
     }
     # Render a NEW template 'userpanel.html'
@@ -3001,19 +3707,31 @@ async def admin_add_normal_user(request: Request,
                                 new_normal_username: str = Form(...),
                                 new_normal_password: str = Form(...),
                                 normal_display_name: str = Form(...),
-                                normal_rank: str = Form(DEFAULT_RANK)):
+                                normal_rank: str = Form(DEFAULT_RANK),
+                                normal_team: str = Form(DEFAULT_TEAM)):
     if not new_normal_username or not new_normal_password or not normal_display_name:
         return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
     if not mongo_store:
         return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
-    added = await mongo_store.add_normal_user(new_normal_username, new_normal_password, normal_display_name, normal_rank)
+    added = await mongo_store.add_normal_user(
+        new_normal_username,
+        new_normal_password,
+        normal_display_name,
+        normal_rank,
+        normal_team,
+    )
     if not added:
         print(f"Add normal user failed: {new_normal_username} already exists.")
     else:
         print(f"Normal user added: {new_normal_username}")
-    await _audit(request, "add_normal_user", new_normal_username, meta={"success": bool(added), "rank": _normalize_rank(normal_rank)})
+    await _audit(
+        request,
+        "add_normal_user",
+        new_normal_username,
+        meta={"success": bool(added), "rank": _normalize_rank(normal_rank), "team": _normalize_team(normal_team)},
+    )
     return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
 @app.post("/admin/remove_normal_user", dependencies=[Depends(require_admin)])
@@ -3047,6 +3765,24 @@ async def admin_update_normal_user_rank(
         print(f"Update rank failed: {username_to_update} not found.")
     await _audit(request, "update_normal_user_rank", username_to_update, meta={"success": bool(updated), "rank": _normalize_rank(normal_rank)})
 
+    return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
+
+@app.post("/admin/update_normal_user_team", dependencies=[Depends(require_admin)])
+async def admin_update_normal_user_team(
+    request: Request,
+    username_to_update: str = Form(...),
+    normal_team: str = Form(DEFAULT_TEAM),
+):
+    if not mongo_store:
+        return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
+
+    updated = await mongo_store.update_normal_user_team(username_to_update, normal_team)
+    await _audit(
+        request,
+        "update_normal_user_team",
+        username_to_update,
+        meta={"success": bool(updated), "team": _normalize_team(normal_team)},
+    )
     return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
 
