@@ -208,6 +208,7 @@
       <button class="tab-btn" data-tab="domains">دامنه‌ها</button>
       <button class="tab-btn" data-tab="feedback">بازخوردها</button>
       <button class="tab-btn" data-tab="users">کاربران و رنک</button>
+      <button class="tab-btn" data-tab="intel">Threat Intel</button>
       <button class="tab-btn" data-tab="system">سیستم</button>
     </div>
 
@@ -386,12 +387,19 @@
                 <option value="pro">pro</option>
               </select>
             </div>
+            <div class="row">
+              <select name="normal_team">
+                {% for t in teams %}
+                <option value="{{ t }}">{{ t }}</option>
+                {% endfor %}
+              </select>
+            </div>
             <button class="btn ok" type="submit">ثبت کاربر</button>
           </form>
           <ul class="list" style="margin-top:8px;">
             {% for username, user_data in all_normal_users.items() %}
             <li>
-              <span>{{ user_data.display_name }} ({{ username }}) - {{ user_data.get("rank", "basic") }}</span>
+              <span>{{ user_data.display_name }} ({{ username }}) - {{ user_data.get("rank", "basic") }} / {{ user_data.get("team", "default") }}</span>
               <div class="row">
                 <form method="POST" action="/admin/update_normal_user_rank" class="row">
                   <input type="hidden" name="username_to_update" value="{{ username }}">
@@ -401,6 +409,15 @@
                     <option value="pro" {% if user_data.get("rank", "basic") == "pro" %}selected{% endif %}>pro</option>
                   </select>
                   <button class="btn small primary" type="submit">آپدیت</button>
+                </form>
+                <form method="POST" action="/admin/update_normal_user_team" class="row">
+                  <input type="hidden" name="username_to_update" value="{{ username }}">
+                  <select name="normal_team">
+                    {% for t in teams %}
+                    <option value="{{ t }}" {% if user_data.get("team", "default") == t %}selected{% endif %}>{{ t }}</option>
+                    {% endfor %}
+                  </select>
+                  <button class="btn small warn" type="submit">Team</button>
                 </form>
                 <form method="POST" action="/admin/remove_normal_user">
                   <input type="hidden" name="username_to_remove_normal" value="{{ username }}">
@@ -435,6 +452,76 @@
             <div id="capExtList"></div>
           </div>
         </div>
+      </div>
+    </section>
+
+    <section id="intel" class="tab">
+      <div class="grid-2">
+        <div class="card">
+          <h3>Playbook + Reports</h3>
+          <div class="row" style="margin-bottom: 10px;">
+            <input type="text" id="incidentDomain" placeholder="domain or url (for incident playbook)">
+            <button class="btn danger" id="incidentRunBtn" type="button">Run Playbook</button>
+          </div>
+          <div class="footer-actions">
+            <a class="btn" href="/admin/weekly_report" target="_blank">Weekly JSON</a>
+            <a class="btn" href="/admin/weekly_report.csv" target="_blank">Weekly CSV</a>
+            <button class="btn warn" id="rebuildBiasBtn" type="button">Rebuild Feedback Bias</button>
+          </div>
+          <div class="muted" id="incidentResult" style="margin-top: 8px;">-</div>
+        </div>
+        <div class="card">
+          <h3>Honey Tokens</h3>
+          <div class="row">
+            <input type="text" id="honeyLabel" placeholder="label (training)">
+            <button class="btn primary" id="honeyCreateBtn" type="button">Create Honey Link</button>
+          </div>
+          <table id="honeyTable" style="margin-top: 8px;">
+            <thead><tr><th>Token</th><th>Label</th><th>Hits</th><th>Link</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h3>Campaign Clusters</h3>
+          <div class="row" style="margin-bottom: 8px;">
+            <input type="number" id="campaignHours" value="72" min="6" max="720">
+            <button class="btn primary small" id="campaignRefreshBtn" type="button">Refresh</button>
+          </div>
+          <table id="campaignTable">
+            <thead><tr><th>ID</th><th>Count</th><th>Max Risk</th><th>Hint</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card">
+          <h3>Typosquat Hunt</h3>
+          <div class="row" style="margin-bottom: 8px;">
+            <input type="text" id="typoBrand" placeholder="target brand domain, eg: paypal.com">
+            <button class="btn primary small" id="typoRunBtn" type="button">Hunt</button>
+          </div>
+          <table id="typoTable">
+            <thead><tr><th>Domain</th><th>Risk</th><th>Similarity</th><th>Action</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Team Sensitivity Policy</h3>
+        <table>
+          <thead><tr><th>Team</th><th>Offset</th><th>Effect</th></tr></thead>
+          <tbody>
+            {% for team, offset in team_policy.items() %}
+            <tr>
+              <td>{{ team }}</td>
+              <td>{{ offset }}</td>
+              <td>{{ "strict +" ~ offset if offset > 0 else ("relaxed " ~ offset if offset < 0 else "neutral") }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
       </div>
     </section>
 
@@ -625,6 +712,141 @@
 
     document.getElementById('refreshFeedbackBtn')?.addEventListener('click', refreshFeedback);
 
+    async function refreshCampaigns() {
+      const body = document.querySelector('#campaignTable tbody');
+      if (!body) return;
+      const hours = Number(document.getElementById('campaignHours')?.value || 72);
+      try {
+        const resp = await fetch(`/admin/campaigns?hours=${encodeURIComponent(hours)}&min_size=2`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        body.innerHTML = '';
+        (data.clusters || []).forEach((c) => {
+          const hint = `${c.keyword || '-'} | ${c.tld || '-'} | ${c.similar_to || '-'}`;
+          body.innerHTML += `<tr>
+            <td>${esc(c.cluster_id || '-')}</td>
+            <td>${Number(c.count || 0)}</td>
+            <td>${Number(c.max_probability || 0)}%</td>
+            <td>${esc(hint)}</td>
+          </tr>`;
+        });
+      } catch (_e) {}
+    }
+
+    async function runTyposquatHunt() {
+      const body = document.querySelector('#typoTable tbody');
+      const brand = document.getElementById('typoBrand')?.value.trim();
+      if (!body || !brand) return;
+      try {
+        const resp = await fetch(`/admin/typosquat_hunt?brand=${encodeURIComponent(brand)}&limit=50`);
+        const data = await resp.json();
+        if (!resp.ok) {
+          alert(data.error || 'hunt failed');
+          return;
+        }
+        body.innerHTML = '';
+        (data.items || []).forEach((row) => {
+          body.innerHTML += `<tr>
+            <td class="mono">${esc(row.domain)}</td>
+            <td>${Number(row.risk || 0)}%</td>
+            <td>${Number(row.similarity || 0)}%</td>
+            <td><button class="btn small danger typo-block" data-domain="${esc(row.domain)}">Block</button></td>
+          </tr>`;
+        });
+        document.querySelectorAll('.typo-block').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            const form = new FormData();
+            form.append('site', btn.dataset.domain || '');
+            const r = await fetch('/admin/add_blacklist', {method: 'POST', body: form});
+            btn.textContent = r.ok ? 'Blocked' : 'Error';
+            if (r.ok) refreshDashboard();
+          });
+        });
+      } catch (_e) {}
+    }
+
+    async function runIncidentPlaybook() {
+      const target = document.getElementById('incidentDomain')?.value.trim();
+      const out = document.getElementById('incidentResult');
+      if (!target || !out) return;
+      out.textContent = 'Running...';
+      try {
+        const resp = await fetch('/admin/incident_playbook', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({domain: target}),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          out.textContent = data.error || 'failed';
+          return;
+        }
+        out.textContent = `Blocked: ${data.domain} | Timeline: ${Number(data.timeline_points || 0)} | Clusters: ${(data.related_clusters || []).length}`;
+        refreshDashboard();
+      } catch (_e) {
+        out.textContent = 'network error';
+      }
+    }
+
+    async function rebuildFeedbackBias() {
+      const btn = document.getElementById('rebuildBiasBtn');
+      if (!btn) return;
+      btn.disabled = true;
+      btn.textContent = 'Running...';
+      try {
+        const r = await fetch('/admin/rebuild_feedback_bias?limit=7000', {method: 'POST'});
+        const data = await r.json();
+        if (r.ok) {
+          btn.textContent = `Done (${Number(data.domains || 0)} domains)`;
+        } else {
+          btn.textContent = data.error || 'Failed';
+        }
+      } catch (_e) {
+        btn.textContent = 'Network error';
+      } finally {
+        setTimeout(() => {
+          btn.disabled = false;
+          btn.textContent = 'Rebuild Feedback Bias';
+        }, 1200);
+      }
+    }
+
+    async function refreshHoneyTokens() {
+      const body = document.querySelector('#honeyTable tbody');
+      if (!body) return;
+      try {
+        const resp = await fetch('/admin/honey_tokens');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        body.innerHTML = '';
+        (data.tokens || []).forEach((row) => {
+          const token = row.token || '';
+          const link = `${window.location.origin}/honey/${token}`;
+          body.innerHTML += `<tr>
+            <td class="mono">${esc(token)}</td>
+            <td>${esc(row.label || '-')}</td>
+            <td>${Number(row.hits || 0)}</td>
+            <td><a class="mono" href="${esc(link)}" target="_blank">${esc(link)}</a></td>
+          </tr>`;
+        });
+      } catch (_e) {}
+    }
+
+    document.getElementById('campaignRefreshBtn')?.addEventListener('click', refreshCampaigns);
+    document.getElementById('typoRunBtn')?.addEventListener('click', runTyposquatHunt);
+    document.getElementById('incidentRunBtn')?.addEventListener('click', runIncidentPlaybook);
+    document.getElementById('rebuildBiasBtn')?.addEventListener('click', rebuildFeedbackBias);
+    document.getElementById('honeyCreateBtn')?.addEventListener('click', async () => {
+      const label = document.getElementById('honeyLabel')?.value.trim() || 'training';
+      const r = await fetch('/admin/honey_tokens', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({label}),
+      });
+      if (r.ok) refreshHoneyTokens();
+    });
+
     let capState = {};
     function renderCapSection(nodeId, sectionName, rank) {
       const root = document.getElementById(nodeId);
@@ -717,9 +939,12 @@
     refreshReports();
     refreshTempTrust();
     refreshFeedback();
+    refreshCampaigns();
+    refreshHoneyTokens();
     loadRankCaps();
     setInterval(refreshDashboard, 15000);
     setInterval(refreshReports, 15000);
+    setInterval(refreshHoneyTokens, 30000);
   </script>
 </body>
 </html>
