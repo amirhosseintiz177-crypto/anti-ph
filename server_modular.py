@@ -29,7 +29,7 @@ import numpy as np
 
 # Fuzzy
 try:
-    from rapidfuzz import fuzz
+    from rapidfuzz import fuzz, process as rf_process
     FUZZY_LIB = 'rapidfuzz'
     print("Using rapidfuzz (WRatio) for optimized fuzzy matching.")
 except ImportError:
@@ -37,6 +37,7 @@ except ImportError:
     def ratio_fallback(a, b):
         return SequenceMatcher(None, a.lower(), b.lower()).ratio() * 100
     fuzz = type('FuzzModule', (object,), {'ratio': ratio_fallback})
+    rf_process = None
     FUZZY_LIB = 'difflib'
     print("Warning: rapidfuzz not found. Falling back to slow difflib. Install with 'pip install rapidfuzz'")
 
@@ -559,6 +560,11 @@ class PhishDetector:
     TRUSTED_CACHE = TRUSTED_GLOBAL_CACHE
     REPO_RAW_URL = "https://s27.uupload.ir/files/09171258914/cloudflare-radar_top-1000000-domains_20251103-20251110.csv" # Or your preferred source
     EXTENSION_UPLOAD_DIR = "static/extension_files"
+    MAX_FUZZY_CANDIDATES = 1200
+    RESULT_CACHE_MAX_ITEMS = 12000
+    RESULT_CACHE_TTL_SAFE = 10 * 60
+    RESULT_CACHE_TTL_PHISH = 45 * 60
+    RESULT_CACHE_TTL_ERROR = 60
 
     def __init__(self):
         # Synchronization Primitives
@@ -566,6 +572,7 @@ class PhishDetector:
         self.reports_lock = threading.Lock()
         self.sensitivity_lock = threading.RLock() # Keep RLock for sensitivity
         self.health_lock = threading.Lock()
+        self.result_cache_lock = threading.Lock()
 
         # Data Stores
         self.trusted_global: Set[str] = set()
@@ -578,6 +585,8 @@ class PhishDetector:
         self.server_sensitivity = 90 # Default sensitivity, overridden by Mongo
 
         self.extension_filename: Optional[str] = None
+        self.global_tld_index: Dict[str, Dict[str, List[str]]] = {}
+        self.result_cache: Dict[str, Dict[str, Any]] = {}
         self.store: Optional[MongoStore] = None
         os.makedirs(self.EXTENSION_UPLOAD_DIR, exist_ok=True)
 
@@ -601,6 +610,144 @@ class PhishDetector:
         if not a or not b: return 0
         if FUZZY_LIB == 'rapidfuzz': return int(fuzz.WRatio(a.lower(), b.lower()))
         else: return int(fuzz.ratio(a.lower(), b.lower()))
+
+    def _extract_tld(self, host: str) -> str:
+        parts = (host or "").split(".")
+        if len(parts) < 2:
+            return ""
+        return parts[-1]
+
+    def _extract_sld(self, host: str) -> str:
+        parts = (host or "").split(".")
+        if len(parts) < 2:
+            return host or ""
+        return parts[-2]
+
+    def _rebuild_global_index(self):
+        idx: Dict[str, Dict[str, List[str]]] = {}
+        with self.list_lock:
+            for domain in self.trusted_global:
+                tld = self._extract_tld(domain)
+                sld = self._extract_sld(domain)
+                if not tld or not sld:
+                    continue
+                first = sld[0]
+                idx.setdefault(tld, {}).setdefault(first, []).append(domain)
+        self.global_tld_index = idx
+
+    def _clear_result_cache(self):
+        with self.result_cache_lock:
+            self.result_cache = {}
+
+    def _cache_key(self, host: str, sensitivity: int) -> str:
+        return f"{int(sensitivity)}|{host}"
+
+    def _cache_get(self, key: str) -> Optional[Dict[str, Any]]:
+        now = time.time()
+        with self.result_cache_lock:
+            entry = self.result_cache.get(key)
+            if not entry:
+                return None
+            if entry.get("expires_at", 0) <= now:
+                self.result_cache.pop(key, None)
+                return None
+            return dict(entry.get("result", {}))
+
+    def _cache_set(self, key: str, result: Dict[str, Any]):
+        if not key:
+            return
+        if result.get("error"):
+            ttl = self.RESULT_CACHE_TTL_ERROR
+        elif result.get("is_phishing"):
+            ttl = self.RESULT_CACHE_TTL_PHISH
+        else:
+            ttl = self.RESULT_CACHE_TTL_SAFE
+
+        now = time.time()
+        with self.result_cache_lock:
+            self.result_cache[key] = {
+                "result": dict(result),
+                "expires_at": now + ttl,
+                "touched_at": now,
+            }
+            if len(self.result_cache) <= self.RESULT_CACHE_MAX_ITEMS:
+                return
+            oldest_key = None
+            oldest_touched = float("inf")
+            for k, v in self.result_cache.items():
+                touched = v.get("touched_at", now)
+                if touched < oldest_touched:
+                    oldest_touched = touched
+                    oldest_key = k
+            if oldest_key:
+                self.result_cache.pop(oldest_key, None)
+
+    def _candidate_domains(self, target_host: str) -> List[str]:
+        target_tld = self._extract_tld(target_host)
+        target_sld = self._extract_sld(target_host)
+        first = target_sld[0] if target_sld else ""
+        target_len = len(target_host)
+
+        with self.list_lock:
+            tld_buckets = self.global_tld_index.get(target_tld, {})
+            same_first = list(tld_buckets.get(first, []))
+            user_local = list(self.user_trusted)
+
+        seed: List[str] = same_first
+
+        # If the "same first char + same TLD" bucket is tiny, add a very small sample
+        # from other buckets to avoid missing obvious lookalikes.
+        if len(seed) < 200 and tld_buckets:
+            for bucket_key, values in tld_buckets.items():
+                if bucket_key == first:
+                    continue
+                seed.extend(values[:50])
+                if len(seed) >= self.MAX_FUZZY_CANDIDATES * 2:
+                    break
+
+        # Rare fallback for uncommon TLDs where index has no data.
+        if not seed:
+            with self.list_lock:
+                for d in self.trusted_global:
+                    if abs(len(d) - target_len) > 8:
+                        continue
+                    seed.append(d)
+                    if len(seed) >= 500:
+                        break
+
+        candidates: List[str] = []
+        seen: Set[str] = set()
+
+        for d in seed:
+            if abs(len(d) - target_len) > 8:
+                continue
+            if d in seen:
+                continue
+            seen.add(d)
+            candidates.append(d)
+            if len(candidates) >= self.MAX_FUZZY_CANDIDATES:
+                break
+
+        # Always include user trusted domains (usually small), even if length differs.
+        for d in user_local:
+            if d in seen:
+                continue
+            seen.add(d)
+            candidates.append(d)
+            if len(candidates) >= self.MAX_FUZZY_CANDIDATES + 200:
+                break
+
+        return candidates
+
+    def _to_lite_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "is_phishing": bool(result.get("is_phishing", False)),
+            "domain": result.get("domain", ""),
+            "probability": int(result.get("probability", 0) or 0),
+            "threshold": result.get("threshold"),
+            "similar_to": result.get("similar_to"),
+            "error": result.get("error"),
+        }
 
     # --- MODIFIED --- Generic save/load using the list_lock
     def _save_json_set(self, path: str, data: Set[str]):
@@ -642,6 +789,8 @@ class PhishDetector:
         self.user_trusted = set()
         self.user_blacklist = set()
         self.trusted_global = self._load_json_set(self.TRUSTED_CACHE)
+        self._rebuild_global_index()
+        self._clear_result_cache()
         print(f"Loaded {len(self.trusted_global)} global domains. User lists will load from MongoDB.")
 
     async def load_from_store(self, store: MongoStore):
@@ -652,6 +801,7 @@ class PhishDetector:
         self.user_blacklist = set(self._normalize_host(d) for d in blacklist if self._normalize_host(d))
         self.extension_filename = await store.get_extension_filename()
         self.server_sensitivity = await store.get_server_sensitivity(self.server_sensitivity)
+        self._clear_result_cache()
         print(f"Mongo load: {len(self.user_trusted)} trusted, {len(self.user_blacklist)} blacklisted domains. Sensitivity: {self.server_sensitivity}%")
 
     async def _refresh_trusted_global(self):
@@ -676,6 +826,8 @@ class PhishDetector:
                      # --- MODIFIED --- Use the generic save function
                     self.trusted_global = new_set
                     self._save_json_set(self.TRUSTED_CACHE, self.trusted_global)
+                    self._rebuild_global_index()
+                    self._clear_result_cache()
 
                 await asyncio.to_thread(_save_and_update, new_set)
                 with self.health_lock: self.health_status["global_cache"] = f"OK ({len(new_set)})"
@@ -698,8 +850,10 @@ class PhishDetector:
             if host not in self.user_trusted:
                 self.user_trusted.add(host)
                 updated = True
-        if updated and self.store:
-            await self.store.set_list("user_trusted", sorted(self.user_trusted))
+        if updated:
+            if self.store:
+                await self.store.set_list("user_trusted", sorted(self.user_trusted))
+            self._clear_result_cache()
         return updated
 
     async def remove_user_trusted(self, host: str) -> bool:
@@ -711,8 +865,10 @@ class PhishDetector:
             if host in self.user_trusted:
                 self.user_trusted.remove(host)
                 updated = True
-        if updated and self.store:
-            await self.store.set_list("user_trusted", sorted(self.user_trusted))
+        if updated:
+            if self.store:
+                await self.store.set_list("user_trusted", sorted(self.user_trusted))
+            self._clear_result_cache()
         return updated
 
     # --- NEW --- Blacklist add method
@@ -725,8 +881,10 @@ class PhishDetector:
             if host not in self.user_blacklist:
                 self.user_blacklist.add(host)
                 updated = True
-        if updated and self.store:
-            await self.store.set_list("user_blacklist", sorted(self.user_blacklist))
+        if updated:
+            if self.store:
+                await self.store.set_list("user_blacklist", sorted(self.user_blacklist))
+            self._clear_result_cache()
         return updated
 
     # --- NEW --- Blacklist remove method
@@ -739,8 +897,10 @@ class PhishDetector:
             if host in self.user_blacklist:
                 self.user_blacklist.remove(host)
                 updated = True
-        if updated and self.store:
-            await self.store.set_list("user_blacklist", sorted(self.user_blacklist))
+        if updated:
+            if self.store:
+                await self.store.set_list("user_blacklist", sorted(self.user_blacklist))
+            self._clear_result_cache()
         return updated
 
     # --- MODIFIED --- Get data includes blacklist
@@ -777,6 +937,7 @@ class PhishDetector:
     async def set_server_sensitivity(self, sensitivity: int):
         with self.sensitivity_lock:
             self.server_sensitivity = max(50, min(100, sensitivity))
+        self._clear_result_cache()
         if self.store:
             await self.store.set_server_sensitivity(self.server_sensitivity)
 
@@ -791,115 +952,148 @@ class PhishDetector:
     # ######################################
     
     # --- Main Detector Logic (MODIFIED FOR PRECISION) ---
-    async def check_link(self, target_url: str, user_sensitivity: Optional[int] = None) -> Dict[str, Any]:
+    async def check_link(self, target_url: str, user_sensitivity: Optional[int] = None, lite: bool = False) -> Dict[str, Any]:
         target_host = self._normalize_host(target_url)
-        if not target_host: return {"is_phishing": False, "domain": "", "probability": 0, "reasons": ["Invalid host"]}
+        if not target_host:
+            invalid = {"is_phishing": False, "domain": "", "probability": 0, "reasons": ["Invalid host"], "indicators": []}
+            return self._to_lite_result(invalid) if lite else invalid
 
-        # --- Check Blacklist FIRST ---
-        with self.list_lock: # Need lock to read blacklist safely
-            if target_host in self.user_blacklist:
-                self.add_report(target_url, target_host, 100, "N/A", ["Force blocked by blacklist"])
-                return {"is_phishing": True, "domain": target_host, "probability": 100, "reasons": ["Force blocked by blacklist"], "similar_to": None}
+        try:
+            effective_sensitivity = int(user_sensitivity) if user_sensitivity is not None else int(self.server_sensitivity)
+        except Exception:
+            effective_sensitivity = int(self.server_sensitivity)
+        effective_sensitivity = max(50, min(100, effective_sensitivity))
+        phish_threshold = int(round(max(50, min(95, 100 - (effective_sensitivity * 0.5)))))
 
-        # *****************************************************************
-        # --- Trusted/Clean Check: IMMEDIATE EXIT ON EXACT MATCH (Optimized) ---
-        # این بخش، که خواسته شماست، تضمین می‌کند در صورت تطابق دقیق، تحلیل فازی متوقف شود.
-        # *****************************************************************
+        cache_key = self._cache_key(target_host, effective_sensitivity)
+        cached = self._cache_get(cache_key)
+        if cached:
+            return self._to_lite_result(cached) if lite else cached
+
         with self.list_lock:
-            if target_host in self.user_trusted: 
-                return {"is_phishing": False, "domain": target_host, "probability": 0, "reasons": ["Trusted by user"]}
-            if target_host in self.trusted_global: 
-                return {"is_phishing": False, "domain": target_host, "probability": 0, "reasons": ["Trusted globally"]}
-        # *****************************************************************
+            in_blacklist = target_host in self.user_blacklist
+            in_user_trusted = target_host in self.user_trusted
+            in_global_trusted = target_host in self.trusted_global
 
-        indicators = _url_indicators(target_url, target_host)
+        if in_blacklist:
+            blacklisted = {
+                "is_phishing": True,
+                "domain": target_host,
+                "probability": 100,
+                "similar_to": None,
+                "reasons": ["Force blocked by blacklist"],
+                "indicators": [],
+                "sensitivity": effective_sensitivity,
+                "user_sensitivity": user_sensitivity,
+                "threshold": phish_threshold,
+            }
+            self.add_report(target_url, target_host, 100, "N/A", ["Force blocked by blacklist"])
+            self._cache_set(cache_key, blacklisted)
+            return self._to_lite_result(blacklisted) if lite else blacklisted
 
-        # ML Model Health Check
+        if in_user_trusted or in_global_trusted:
+            trusted_result = {
+                "is_phishing": False,
+                "domain": target_host,
+                "probability": 0,
+                "similar_to": None,
+                "reasons": ["Trusted by user"] if in_user_trusted else ["Trusted globally"],
+                "indicators": [],
+                "sensitivity": effective_sensitivity,
+                "user_sensitivity": user_sensitivity,
+                "threshold": phish_threshold,
+            }
+            self._cache_set(cache_key, trusted_result)
+            return self._to_lite_result(trusted_result) if lite else trusted_result
+
         if not self.ml_model.is_healthy:
             raise HTTPException(status_code=503, detail={"error": "ML Model unavailable", "message": "DL model failed."})
 
-        # --- Determine sensitivity and threshold ---
-        effective_sensitivity = user_sensitivity if user_sensitivity is not None else self.server_sensitivity
-        # High sensitivity = lower threshold (e.g., 90 sens -> 55 threshold)
-        # Low sensitivity = high threshold (e.g., 50 sens -> 75 threshold)
-        PHISH_THRESHOLD = int(round(max(50, min(95, 100 - (effective_sensitivity * 0.5)))))
+        indicators = [] if lite else _url_indicators(target_url, target_host)
+        candidates = self._candidate_domains(target_host)
 
-        # Offload blocking work
         try:
-            # --- Pass sensitivity and threshold into the thread ---
             def _blocking_check(sensitivity_level: int, threshold_level: int):
-                target_host_len = len(target_host); max_similarity = 0; most_similar_trusted: Optional[str] = None
-                
-                with self.list_lock:
-                    combined_trusted = self.trusted_global.union(self.user_trusted)
+                max_similarity = 0
+                most_similar_trusted: Optional[str] = None
 
-                # --- Find best match (FUZZY MATCHING STARTS HERE) ---
-                for trusted_host in combined_trusted:
-                    trusted_host_len = len(trusted_host)
-                    if abs(trusted_host_len - target_host_len) > 8: continue # Length optimization
-                    sim = self._similarity(target_host, trusted_host)
-                    if sim < 60: continue # Minimum similarity gate
-                    if sim > max_similarity: max_similarity = sim; most_similar_trusted = trusted_host
+                if candidates:
+                    if FUZZY_LIB == 'rapidfuzz' and rf_process:
+                        best = rf_process.extractOne(
+                            target_host,
+                            candidates,
+                            scorer=fuzz.WRatio,
+                            score_cutoff=60,
+                        )
+                        if best:
+                            most_similar_trusted = best[0]
+                            max_similarity = int(best[1])
+                    else:
+                        for trusted_host in candidates:
+                            sim = self._similarity(target_host, trusted_host)
+                            if sim < 60:
+                                continue
+                            if sim > max_similarity:
+                                max_similarity = sim
+                                most_similar_trusted = trusted_host
 
-                # --- Decision Logic ---
-                is_phishing = False; probability = 0; reasons = []
+                is_phishing = False
+                probability = 0
+                reasons: List[str] = []
+
                 if max_similarity >= 60 and most_similar_trusted:
                     ml_risk_score = self.ml_model.predict_risk(target_host, most_similar_trusted, max_similarity)
-
-                    # ###############
-                    # ### PRECISION FIX (Gap-Fill Probability Logic) ###
-                    # ###############
-                    
-                    # 1. Create a sensitivity multiplier between 0.5 (for 50 sens)
-                    #    and 1.5 (for 100 sens). The midpoint (75 sens) is 1.0.
                     sensitivity_multiplier = 0.5 + (sensitivity_level - 50) * 0.02
-                    
-                    # 2. Adjust the ML risk score (0.0 to 1.0) by the sensitivity.
-                    #    This determines *how much* of the remaining gap to fill.
                     adjusted_risk_score = min(1.0, ml_risk_score * sensitivity_multiplier)
-
-                    # 3. Calculate how much to add to the base similarity score.
                     remaining_gap = 100 - max_similarity
                     boost_to_add = remaining_gap * adjusted_risk_score
-                    
-                    # 4. Final probability is the base match + the calculated boost.
                     probability = int(round(max_similarity + boost_to_add))
-                    
-                    # ###############
-                    # ###  END FIX  ###
-                    # ###############
-                    
-                    reasons.append(f"Fuzzy Match: {max_similarity}% (to {most_similar_trusted})")
-                    reasons.append(f"ML Risk Score: {ml_risk_score:.2f} (Gap-Fill Boost: +{boost_to_add:.1f}%)")
-                    
+
                     if probability >= threshold_level:
-                        is_phishing = True; reasons.append(f"Final ({probability}%) >= Threshold ({threshold_level}%)")
-                    else:
-                         reasons.append(f"Final ({probability}%) < Threshold ({threshold_level}%)") # Safe reason
-                else:
+                        is_phishing = True
+
+                    reasons.append(f"Risk Score: {probability}%")
+                    if not lite:
+                        reasons.append(f"Fuzzy Match: {max_similarity}% (to {most_similar_trusted})")
+                        reasons.append(f"ML Risk Score: {ml_risk_score:.2f} (Gap-Fill Boost: +{boost_to_add:.1f}%)")
+                        if is_phishing:
+                            reasons.append(f"Final ({probability}%) >= Threshold ({threshold_level}%)")
+                        else:
+                            reasons.append(f"Final ({probability}%) < Threshold ({threshold_level}%)")
+                elif not lite:
                     reasons.append("No trusted domain similar enough (>60%) found.")
 
                 return is_phishing, probability, most_similar_trusted, reasons
 
-            # --- Pass the calculated values to the thread ---
             is_phishing, probability, most_similar_trusted, reasons = await asyncio.to_thread(
-                _blocking_check, effective_sensitivity, PHISH_THRESHOLD
+                _blocking_check, effective_sensitivity, phish_threshold
             )
 
             if indicators:
                 reasons.extend([f"Indicator: {i}" for i in indicators])
 
-            # Report only if phishing
-            if is_phishing:
-                self.add_report(target_url, target_host, probability, most_similar_trusted, reasons)
+            full_result = {
+                "is_phishing": is_phishing,
+                "domain": target_host,
+                "probability": probability,
+                "similar_to": most_similar_trusted,
+                "reasons": reasons,
+                "indicators": indicators,
+                "sensitivity": effective_sensitivity,
+                "user_sensitivity": user_sensitivity,
+                "threshold": phish_threshold,
+            }
 
-            return {"is_phishing": is_phishing, "domain": target_host, "probability": probability,
-                    "similar_to": most_similar_trusted, "reasons": reasons, "indicators": indicators,
-                    "sensitivity": effective_sensitivity, "user_sensitivity": user_sensitivity,
-                    "threshold": PHISH_THRESHOLD} # Also return the threshold for clarity
-        except HTTPException: raise
+            if is_phishing:
+                self.add_report(target_url, target_host, probability, most_similar_trusted, reasons or [f"Risk Score: {probability}%"])
+
+            self._cache_set(cache_key, full_result)
+            return self._to_lite_result(full_result) if lite else full_result
+        except HTTPException:
+            raise
         except Exception as e:
-            print(f"\n[CRITICAL ERROR] Check failed for URL: {target_url}"); traceback.print_exc()
+            print(f"\n[CRITICAL ERROR] Check failed for URL: {target_url}")
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail={"error": "Processing error", "message": str(e)})
 
     # ######################################
@@ -956,10 +1150,14 @@ async def ping():
 # --- Core Check API (unchanged) ---
 @app.post("/check_link")
 async def check_link_api(request: Request):
-    try: data = await request.json(); url = data.get("url"); user_sensitivity = data.get("user_sensitivity")
+    try:
+        data = await request.json()
+        url = data.get("url")
+        user_sensitivity = data.get("user_sensitivity")
+        lite = bool(data.get("lite", False))
     except Exception: return JSONResponse({"error": "Invalid JSON"}, status_code=400)
     if not url: return JSONResponse({"error": "URL not provided"}, status_code=400)
-    try: result = await detector.check_link(url, user_sensitivity); return JSONResponse(result)
+    try: result = await detector.check_link(url, user_sensitivity, lite=lite); return JSONResponse(result)
     except HTTPException as he: return JSONResponse(he.detail, status_code=he.status_code)
     except Exception: return JSONResponse({"is_phishing": False, "error": "Internal API error"}, status_code=500)
 
