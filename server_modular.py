@@ -12,7 +12,8 @@ import ipaddress
 import collections
 import asyncio
 import traceback
-from typing import List, Dict, Any, Set, Optional
+import zipfile
+from typing import List, Dict, Any, Set, Optional, Tuple
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi import FastAPI, HTTPException, Request, Form, Depends, status, UploadFile, File
 # --- NEW --- Import FileResponse for backups
@@ -53,23 +54,59 @@ except ImportError:
 
 # --- Setup ---
 
-TRUSTED_GLOBAL_CACHE = "trusted_global.json"
-
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("PHISH_DATA_DIR", "").strip()
+DEFAULT_THREAT_FEED_SOURCES = [
+    "https://raw.githubusercontent.com/openphish/public_feed/refs/heads/main/feed.txt",
+]
+DEFAULT_TRUSTED_SOURCES = [
+    # Tranco latest list metadata endpoint (resolved to latest CSV/ZIP download dynamically).
+    "https://tranco-list.eu/api/lists/date/latest",
+]
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)))
+    except Exception:
+        return default
+
 def data_file(filename: str) -> str:
     if not DATA_DIR:
-        return filename
+        return os.path.join(BASE_DIR, filename)
+    target_dir = DATA_DIR if os.path.isabs(DATA_DIR) else os.path.join(BASE_DIR, DATA_DIR)
     try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        return os.path.join(DATA_DIR, filename)
+        os.makedirs(target_dir, exist_ok=True)
+        return os.path.join(target_dir, filename)
     except OSError:
-        return filename
+        return os.path.join(BASE_DIR, filename)
+
+TRUSTED_GLOBAL_CACHE = data_file("trusted_global.json")
 
 
 
 SECRET_KEY = os.environ.get("PHISH_SECRET_KEY", "your-default-very-secret-key-please-change-it")
 MONGO_URI = os.environ.get("PHISH_MONGO_URI", "").strip()
 MONGO_DB_NAME = os.environ.get("PHISH_DB_NAME", "phishguard")
+RATE_LIMIT_CHECK_PER_MIN = int(os.environ.get("PHISH_RATE_CHECK_PER_MIN", "120"))
+RATE_LIMIT_BATCH_PER_MIN = int(os.environ.get("PHISH_RATE_BATCH_PER_MIN", "40"))
+RATE_LIMIT_LOGIN_PER_5MIN = int(os.environ.get("PHISH_RATE_LOGIN_PER_5MIN", "15"))
+MAX_BATCH_ITEMS = int(os.environ.get("PHISH_MAX_BATCH_ITEMS", "40"))
+CHECK_BATCH_CONCURRENCY = int(os.environ.get("PHISH_CHECK_BATCH_CONCURRENCY", "8"))
+GSB_API_KEY = os.environ.get("PHISH_GSB_API_KEY", "").strip()
+GSB_TIMEOUT_SEC = _env_float("PHISH_GSB_TIMEOUT_SEC", 2.2)
+
+EXTRA_TRUSTED_SOURCES = [
+    u.strip()
+    for u in os.environ.get("PHISH_TRUSTED_SOURCES", "").split(",")
+    if u.strip()
+]
+TRUSTED_SOURCE_LIST = list(dict.fromkeys(DEFAULT_TRUSTED_SOURCES + EXTRA_TRUSTED_SOURCES))
+EXTRA_THREAT_FEED_SOURCES = [
+    u.strip()
+    for u in os.environ.get("PHISH_THREAT_FEEDS", "").split(",")
+    if u.strip()
+]
+THREAT_FEED_SOURCE_LIST = list(dict.fromkeys(DEFAULT_THREAT_FEED_SOURCES + EXTRA_THREAT_FEED_SOURCES))
 # --- REMOVED --- Single admin user/pass from env vars - now managed in file
 # ADMIN_USER = os.environ.get("PHISH_ADMIN_USER", "admin")
 # ADMIN_PASS = os.environ.get("PHISH_ADMIN_PASS", "12345")
@@ -198,6 +235,9 @@ SUSPICIOUS_KEYWORDS = {
     "login", "verify", "update", "secure", "account", "bank", "payment",
     "signin", "password", "wallet", "billing",
 }
+SUSPICIOUS_TLDS = {
+    "top", "xyz", "click", "work", "rest", "gq", "cf", "ml", "tk", "fit", "cam",
+}
 
 def _normalize_url_for_parse(url: str) -> str:
     if not url:
@@ -219,6 +259,9 @@ def _url_indicators(url: str, host: str) -> List[str]:
     parsed = urllib.parse.urlparse(normalized_url)
     netloc = parsed.netloc or host
 
+    if parsed.scheme and parsed.scheme.lower() != "https":
+        indicators.append("Non-HTTPS scheme")
+
     host_lower = (host or "").lower()
     if host_lower and any(host_lower == d or host_lower.endswith(f".{d}") for d in SHORTENER_DOMAINS):
         indicators.append("Shortener domain")
@@ -239,6 +282,9 @@ def _url_indicators(url: str, host: str) -> List[str]:
         labels = [p for p in host_lower.split(".") if p]
         if len(labels) > 3:
             indicators.append("Many subdomains")
+        tld = labels[-1] if labels else ""
+        if tld in SUSPICIOUS_TLDS:
+            indicators.append("Suspicious TLD")
 
     if url and len(url) > 120:
         indicators.append("Long URL")
@@ -292,6 +338,8 @@ def _short_reason(reasons: List[str]) -> str:
     text = " | ".join(reasons)
     if "blacklist" in text.lower():
         return "Blacklisted"
+    if "known malicious domain" in text.lower() or "threat feed" in text.lower():
+        return "Threat feed hit"
     if "trusted by user" in text.lower():
         return "Trusted (user)"
     if "trusted globally" in text.lower():
@@ -308,8 +356,12 @@ def _short_reason(reasons: List[str]) -> str:
         return "Unicode domain"
     if "many subdomains" in text.lower():
         return "Many subdomains"
+    if "suspicious tld" in text.lower():
+        return "Suspicious TLD"
     if "long url" in text.lower():
         return "Long URL"
+    if "non-https scheme" in text.lower():
+        return "Non-HTTPS URL"
     if "sensitive keywords" in text.lower():
         return "Sensitive keywords"
     if "unusual port" in text.lower():
@@ -320,6 +372,10 @@ def _short_reason(reasons: List[str]) -> str:
         return "Looks similar to trusted domain"
     if "ml risk score" in text.lower():
         return "ML risk signal"
+    if "google safe browsing match" in text.lower():
+        return "Safe Browsing match"
+    if "brand token matched" in text.lower() or "brand injection" in text.lower():
+        return "Brand impersonation pattern"
     return reasons[0]
 
 async def _redirect_chain(url: str, max_hops: int = 8) -> List[str]:
@@ -331,6 +387,43 @@ async def _redirect_chain(url: str, max_hops: int = 8) -> List[str]:
     except Exception:
         return []
 
+class SlidingWindowRateLimiter:
+    def __init__(self, limit: int, window_seconds: int):
+        self.limit = max(1, int(limit))
+        self.window_seconds = max(1, int(window_seconds))
+        self._lock = threading.Lock()
+        self._hits: Dict[str, collections.deque] = {}
+
+    def allow(self, key: str, cost: int = 1) -> Tuple[bool, int]:
+        now = time.time()
+        cost = max(1, int(cost))
+        window_start = now - self.window_seconds
+
+        with self._lock:
+            dq = self._hits.get(key)
+            if dq is None:
+                dq = collections.deque()
+                self._hits[key] = dq
+
+            while dq and dq[0] < window_start:
+                dq.popleft()
+
+            if len(dq) + cost > self.limit:
+                retry_after = max(1, int(self.window_seconds - (now - dq[0]))) if dq else self.window_seconds
+                return False, retry_after
+
+            for _ in range(cost):
+                dq.append(now)
+            return True, 0
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
 class MongoStore:
     def __init__(self, uri: str, db_name: str):
         self.client = AsyncIOMotorClient(uri)
@@ -338,6 +431,8 @@ class MongoStore:
         self.admin_users = self.db["admin_users"]
         self.normal_users = self.db["normal_users"]
         self.settings = self.db["settings"]
+        self.audit_logs = self.db["audit_logs"]
+        self.feedback = self.db["feedback"]
 
     async def ensure_defaults(self):
         if await self.admin_users.count_documents({}) == 0:
@@ -369,6 +464,9 @@ class MongoStore:
             {"$setOnInsert": {"value": []}},
             upsert=True,
         )
+        await self.audit_logs.create_index([("time", -1)])
+        await self.feedback.create_index([("time", -1)])
+        await self.feedback.create_index([("domain", 1)])
 
         await self.normalize_normal_user_ranks()
 
@@ -487,6 +585,44 @@ class MongoStore:
     async def set_server_sensitivity(self, value: int):
         await self.set_setting("server_sensitivity", int(value))
 
+    async def add_audit_log(
+        self,
+        actor: str,
+        action: str,
+        target: str = "",
+        meta: Optional[Dict[str, Any]] = None,
+        ip: str = "",
+    ):
+        await self.audit_logs.insert_one({
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "actor": actor or "unknown",
+            "action": action,
+            "target": target,
+            "ip": ip,
+            "meta": meta or {},
+        })
+
+    async def get_recent_audit_logs(self, limit: int = 200) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        cursor = self.audit_logs.find({}).sort("time", -1).limit(max(1, min(limit, 2000)))
+        async for doc in cursor:
+            doc.pop("_id", None)
+            items.append(doc)
+        return items
+
+    async def add_feedback(self, payload: Dict[str, Any]):
+        doc = dict(payload)
+        doc["time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        await self.feedback.insert_one(doc)
+
+    async def get_feedback_recent(self, limit: int = 200) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        cursor = self.feedback.find({}).sort("time", -1).limit(max(1, min(limit, 2000)))
+        async for doc in cursor:
+            doc.pop("_id", None)
+            items.append(doc)
+        return items
+
 
 mongo_store: Optional[MongoStore] = None
 
@@ -502,7 +638,8 @@ app.add_middleware(
 )
 
 
-templates = Jinja2Templates(directory="templates")
+templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 
 # --- User data is stored in MongoDB (see MongoStore) ---
 
@@ -559,7 +696,9 @@ class PhishDetector:
 
     TRUSTED_CACHE = TRUSTED_GLOBAL_CACHE
     REPO_RAW_URL = "https://s27.uupload.ir/files/09171258914/cloudflare-radar_top-1000000-domains_20251103-20251110.csv" # Or your preferred source
-    EXTENSION_UPLOAD_DIR = "static/extension_files"
+    TRUSTED_SOURCES = list(dict.fromkeys([REPO_RAW_URL] + TRUSTED_SOURCE_LIST))
+    THREAT_FEED_SOURCES = THREAT_FEED_SOURCE_LIST
+    EXTENSION_UPLOAD_DIR = os.path.join(BASE_DIR, "static", "extension_files")
     MAX_FUZZY_CANDIDATES = 1200
     RESULT_CACHE_MAX_ITEMS = 12000
     RESULT_CACHE_TTL_SAFE = 10 * 60
@@ -573,9 +712,11 @@ class PhishDetector:
         self.sensitivity_lock = threading.RLock() # Keep RLock for sensitivity
         self.health_lock = threading.Lock()
         self.result_cache_lock = threading.Lock()
+        self.gsb_cache_lock = threading.Lock()
 
         # Data Stores
         self.trusted_global: Set[str] = set()
+        self.threat_feed: Set[str] = set()
         self.user_trusted: Set[str] = set()
         # --- NEW --- Blacklist store
         self.user_blacklist: Set[str] = set()
@@ -587,6 +728,7 @@ class PhishDetector:
         self.extension_filename: Optional[str] = None
         self.global_tld_index: Dict[str, Dict[str, List[str]]] = {}
         self.result_cache: Dict[str, Dict[str, Any]] = {}
+        self.gsb_cache: Dict[str, Dict[str, Any]] = {}
         self.store: Optional[MongoStore] = None
         os.makedirs(self.EXTENSION_UPLOAD_DIR, exist_ok=True)
 
@@ -595,6 +737,8 @@ class PhishDetector:
         self.health_status = {"ml_model": "OK" if self.ml_model.is_healthy else "FAILED",
                               "global_cache": "CHECKING",
                               "last_ping": time.time()}
+        self.gsb_api_key = GSB_API_KEY
+        self.gsb_timeout_sec = max(0.8, min(5.0, GSB_TIMEOUT_SEC))
 
         self._load_data_on_startup()
         print(f"PhishDetector initialized. Sensitivity: {self.server_sensitivity}%")
@@ -605,6 +749,16 @@ class PhishDetector:
         if "://" in s: s = urllib.parse.urlparse(s).netloc
         s = s.split("/", 1)[0].split(":")[0]
         return s.replace("www.", "")
+
+    def _host_or_parent_in_set(self, host: str, domains: Set[str]) -> Tuple[bool, Optional[str]]:
+        labels = [p for p in (host or "").split(".") if p]
+        if len(labels) < 2:
+            return False, None
+        for i in range(0, len(labels) - 1):
+            candidate = ".".join(labels[i:])
+            if candidate in domains:
+                return True, candidate
+        return False, None
 
     def _similarity(self, a: str, b: str) -> int:
         if not a or not b: return 0
@@ -682,6 +836,30 @@ class PhishDetector:
             if oldest_key:
                 self.result_cache.pop(oldest_key, None)
 
+    def _gsb_cache_get(self, url: str) -> Optional[Tuple[bool, str]]:
+        now = time.time()
+        with self.gsb_cache_lock:
+            entry = self.gsb_cache.get(url)
+            if not entry:
+                return None
+            if entry.get("expires_at", 0) <= now:
+                self.gsb_cache.pop(url, None)
+                return None
+            return bool(entry.get("matched", False)), str(entry.get("threat", ""))
+
+    def _gsb_cache_set(self, url: str, matched: bool, threat: str):
+        ttl = 12 * 60 if matched else 30 * 60
+        with self.gsb_cache_lock:
+            self.gsb_cache[url] = {
+                "matched": bool(matched),
+                "threat": threat or "",
+                "expires_at": time.time() + ttl,
+            }
+            if len(self.gsb_cache) > 6000:
+                # Trim oldest random-ish item by expiration time.
+                oldest_key = min(self.gsb_cache, key=lambda k: self.gsb_cache[k].get("expires_at", 0))
+                self.gsb_cache.pop(oldest_key, None)
+
     def _candidate_domains(self, target_host: str) -> List[str]:
         target_tld = self._extract_tld(target_host)
         target_sld = self._extract_sld(target_host)
@@ -749,6 +927,82 @@ class PhishDetector:
             "error": result.get("error"),
         }
 
+    def _heuristic_risk(self, target_url: str, host: str, indicators: List[str]) -> int:
+        weights = {
+            "Shortener domain": 18,
+            "IP address in URL": 35,
+            "Userinfo (@) in URL": 22,
+            "Punycode domain": 24,
+            "Unicode in domain": 16,
+            "Many subdomains": 12,
+            "Long URL": 10,
+            "Sensitive keywords in path": 14,
+            "Unusual port": 12,
+            "Invalid port": 12,
+            "Non-HTTPS scheme": 8,
+            "Suspicious TLD": 16,
+        }
+        score = 0
+        for indicator in indicators:
+            score += weights.get(indicator, 0)
+
+        host_l = (host or "").lower()
+        sld = self._extract_sld(host_l)
+        if sld.count('-') >= 2:
+            score += 8
+        if len(sld) >= 20:
+            score += 8
+        digit_count = sum(c.isdigit() for c in sld)
+        if digit_count >= 3:
+            score += 10
+
+        # If URL path contains multiple sensitive words, boost slightly.
+        path_l = _normalize_url_for_parse(target_url).lower()
+        keyword_hits = sum(1 for k in SUSPICIOUS_KEYWORDS if k in path_l)
+        if keyword_hits >= 2:
+            score += 10
+
+        return max(0, min(85, int(score)))
+
+    def _brand_injection_signal(self, target_host: str, candidates: List[str]) -> Tuple[int, Optional[str]]:
+        """
+        Detect hosts like `google-security-login.com` where a trusted brand token
+        exists inside a longer suspicious SLD.
+        """
+        target_sld = self._extract_sld((target_host or "").lower())
+        if len(target_sld) < 8:
+            return 0, None
+
+        best_brand_domain: Optional[str] = None
+        best_score = 0
+
+        # Keep this bounded so every check stays cheap.
+        for domain in candidates[:500]:
+            brand = self._extract_sld((domain or "").lower())
+            if len(brand) < 4 or brand == target_sld:
+                continue
+            if brand not in target_sld:
+                continue
+
+            remainder = target_sld.replace(brand, " ")
+            remainder_tokens = [t for t in re.split(r"[^a-z0-9]+", remainder) if t]
+            if not remainder_tokens:
+                continue
+
+            score = 8
+            if any(t in SUSPICIOUS_KEYWORDS for t in remainder_tokens):
+                score += 12
+            if sum(c.isdigit() for c in "".join(remainder_tokens)) >= 2:
+                score += 4
+            if len(remainder_tokens) >= 2:
+                score += 3
+
+            if score > best_score:
+                best_score = score
+                best_brand_domain = domain
+
+        return min(30, best_score), best_brand_domain
+
     # --- MODIFIED --- Generic save/load using the list_lock
     def _save_json_set(self, path: str, data: Set[str]):
         with self.list_lock: # Protect file writing
@@ -805,40 +1059,211 @@ class PhishDetector:
         print(f"Mongo load: {len(self.user_trusted)} trusted, {len(self.user_blacklist)} blacklisted domains. Sensitivity: {self.server_sensitivity}%")
 
     async def _refresh_trusted_global(self):
-        print(f"Refreshing global trusted list from {self.REPO_RAW_URL} (Async)...")
+        sources = list(dict.fromkeys(self.TRUSTED_SOURCES))
+        print(f"Refreshing global trusted list from {len(sources)} source(s) (Async)...")
+
+        def _process_lines(lines: List[str]) -> Set[str]:
+            temp_set: Set[str] = set()
+            for line in lines:
+                parts = line.split(',', 1)
+                domain_part = parts[1] if len(parts) == 2 else parts[0]
+                normalized = self._normalize_host(domain_part)
+                if normalized and '.' in normalized:
+                    temp_set.add(normalized)
+            return temp_set
+
+        def _extract_download_url(payload: Any) -> Optional[str]:
+            if isinstance(payload, dict):
+                for key in ("download", "download_url", "csv", "csv_url", "url"):
+                    value = payload.get(key)
+                    if isinstance(value, str) and value.startswith("http"):
+                        return value
+                for key, value in payload.items():
+                    if "download" in str(key).lower() and isinstance(value, str) and value.startswith("http"):
+                        return value
+                for value in payload.values():
+                    candidate = _extract_download_url(value)
+                    if candidate:
+                        return candidate
+                return None
+            if isinstance(payload, list):
+                for item in payload:
+                    candidate = _extract_download_url(item)
+                    if candidate:
+                        return candidate
+            return None
+
+        def _decode_bytes(blob: bytes) -> str:
+            for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+                try:
+                    return blob.decode(encoding)
+                except Exception:
+                    continue
+            return ""
+
+        def _extract_lines_from_zip(blob: bytes) -> List[str]:
+            with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+                names = zf.namelist()
+                if not names:
+                    return []
+                csv_candidates = [name for name in names if name.lower().endswith(".csv")]
+                selected = csv_candidates[0] if csv_candidates else names[0]
+                with zf.open(selected) as file_obj:
+                    text = _decode_bytes(file_obj.read())
+            return text.splitlines()
+
+        async def _fetch_one(source: str) -> Set[str]:
+            async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
+                response = await client.get(source)
+                response.raise_for_status()
+
+                content_type = (response.headers.get("content-type") or "").lower()
+                if "tranco-list.eu/api/lists/" in source or "application/json" in content_type:
+                    try:
+                        payload = response.json()
+                    except Exception:
+                        payload = {}
+                    download_url = _extract_download_url(payload)
+                    if download_url:
+                        response = await client.get(download_url)
+                        response.raise_for_status()
+                        content_type = (response.headers.get("content-type") or "").lower()
+
+            raw_blob = response.content
+            source_l = source.lower()
+            is_zip = source_l.endswith(".zip") or "zip" in content_type or raw_blob.startswith(b"PK")
+            if is_zip:
+                lines = await asyncio.to_thread(_extract_lines_from_zip, raw_blob)
+            else:
+                lines = response.text.splitlines()
+
+            if lines and ('rank' in lines[0].lower() or 'domain' in lines[0].lower()):
+                lines = lines[1:]
+            return await asyncio.to_thread(_process_lines, lines)
+
+        last_error = None
+        combined_set: Set[str] = set()
+        for source in sources:
+            try:
+                new_set = await _fetch_one(source)
+                if not new_set:
+                    continue
+                combined_set.update(new_set)
+                print(f"Trusted source loaded: {source} ({len(new_set)} domains)")
+            except Exception as e:
+                last_error = e
+                print(f"Refresh source failed ({source}): {e}")
+
+        if combined_set:
+            def _save_and_update(updated_set: Set[str]):
+                self.trusted_global = updated_set
+                self._save_json_set(self.TRUSTED_CACHE, self.trusted_global)
+                self._rebuild_global_index()
+                self._clear_result_cache()
+
+            await asyncio.to_thread(_save_and_update, combined_set)
+            with self.health_lock:
+                self.health_status["global_cache"] = f"OK ({len(combined_set)})"
+            print(f"Refreshed global list from {len(sources)} source(s): {len(self.trusted_global)} domains.")
+            return
+
+        if last_error is not None:
+            with self.health_lock:
+                self.health_status["global_cache"] = f"FAILED: {last_error.__class__.__name__}"
+
+    def _parse_threat_feed_text(self, content: str) -> Set[str]:
+        out: Set[str] = set()
+        token_pattern = re.compile(r"(https?://[^\s,;]+|[a-z0-9.-]+\.[a-z]{2,})", re.IGNORECASE)
+        for raw in (content or "").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            # Accept plain domains, URLs, CSV columns and adblock-style rows.
+            cleaned = line.replace("||", " ").replace("^", " ")
+            candidates = token_pattern.findall(cleaned)
+            if not candidates:
+                candidates = [cleaned]
+            for token in candidates:
+                host = self._normalize_host(token.strip())
+                if host and "." in host:
+                    out.add(host)
+        return out
+
+    async def _refresh_threat_feed(self):
+        if not self.THREAT_FEED_SOURCES:
+            return
+        combined: Set[str] = set()
+        for source in self.THREAT_FEED_SOURCES:
+            try:
+                async with httpx.AsyncClient(timeout=35) as client:
+                    resp = await client.get(source)
+                    resp.raise_for_status()
+                parsed = await asyncio.to_thread(self._parse_threat_feed_text, resp.text)
+                if parsed:
+                    combined.update(parsed)
+                    print(f"Threat feed loaded from {source}: {len(parsed)} domains")
+            except Exception as e:
+                print(f"Threat feed source failed ({source}): {e}")
+
+        if combined:
+            with self.list_lock:
+                self.threat_feed = combined
+            self._clear_result_cache()
+            print(f"Threat feed refreshed: {len(self.threat_feed)} domains")
+
+    async def _check_google_safe_browsing(self, target_url: str) -> Optional[Tuple[bool, str]]:
+        """
+        Returns:
+          - (True, threat_type) when matched
+          - (False, "") when checked and clean
+          - None when not configured or request failed
+        """
+        if not self.gsb_api_key:
+            return None
+
+        normalized_url = _normalize_url_for_parse(target_url)
+        cached = self._gsb_cache_get(normalized_url)
+        if cached is not None:
+            return cached
+
+        endpoint = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={self.gsb_api_key}"
+        payload = {
+            "client": {"clientId": "phishguard", "clientVersion": "1.0"},
+            "threatInfo": {
+                "threatTypes": [
+                    "MALWARE",
+                    "SOCIAL_ENGINEERING",
+                    "UNWANTED_SOFTWARE",
+                    "POTENTIALLY_HARMFUL_APPLICATION",
+                ],
+                "platformTypes": ["ANY_PLATFORM"],
+                "threatEntryTypes": ["URL"],
+                "threatEntries": [{"url": normalized_url}],
+            },
+        }
         try:
-            async with httpx.AsyncClient(timeout=45) as client: response = await client.get(self.REPO_RAW_URL)
-            response.raise_for_status()
-            lines = response.text.splitlines()
-            if lines and ('rank' in lines[0].lower() or 'domain' in lines[0].lower()): lines = lines[1:]
-
-            def _process_lines(lines):
-                temp_set = set()
-                for line in lines:
-                    parts = line.split(',', 1); domain_part = parts[1] if len(parts) == 2 else parts[0]
-                    normalized = self._normalize_host(domain_part)
-                    if normalized and '.' in normalized: temp_set.add(normalized)
-                return temp_set
-
-            new_set = await asyncio.to_thread(_process_lines, lines)
-            if new_set:
-                def _save_and_update(new_set):
-                     # --- MODIFIED --- Use the generic save function
-                    self.trusted_global = new_set
-                    self._save_json_set(self.TRUSTED_CACHE, self.trusted_global)
-                    self._rebuild_global_index()
-                    self._clear_result_cache()
-
-                await asyncio.to_thread(_save_and_update, new_set)
-                with self.health_lock: self.health_status["global_cache"] = f"OK ({len(new_set)})"
-                print(f"Refreshed global list: {len(self.trusted_global)} domains.")
-        except Exception as e:
-            with self.health_lock: self.health_status["global_cache"] = f"FAILED: {e.__class__.__name__}"
-            print(f"Error refreshing global list: {e}")
+            async with httpx.AsyncClient(timeout=self.gsb_timeout_sec) as client:
+                resp = await client.post(endpoint, json=payload)
+            if resp.status_code >= 400:
+                return None
+            data = resp.json()
+            matches = data.get("matches", []) if isinstance(data, dict) else []
+            if matches:
+                threat_type = str(matches[0].get("threatType", "UNKNOWN"))
+                self._gsb_cache_set(normalized_url, True, threat_type)
+                return True, threat_type
+            self._gsb_cache_set(normalized_url, False, "")
+            return False, ""
+        except Exception:
+            return None
 
     async def _trusted_refresher_worker(self):
         if not self.trusted_global or len(self.trusted_global) < 100: await self._refresh_trusted_global()
-        while True: await asyncio.sleep(6 * 60 * 60); await self._refresh_trusted_global() # Refresh every 6 hours
+        await self._refresh_threat_feed()
+        while True:
+            await asyncio.sleep(6 * 60 * 60)
+            await self._refresh_trusted_global()
+            await self._refresh_threat_feed() # Refresh every 6 hours
 
     # --- Public Data Methods (MODIFIED, added blacklist methods) ---
     async def add_user_trusted(self, host: str) -> bool:
@@ -945,6 +1370,8 @@ class PhishDetector:
         with self.health_lock:
             self.health_status["uptime_seconds"] = int(time.time() - self.health_status.get("last_ping", time.time()))
             self.health_status["ml_model"] = "OK" if self.ml_model.is_healthy else "FAILED"
+            self.health_status["threat_feed_count"] = len(self.threat_feed)
+            self.health_status["gsb_enabled"] = bool(self.gsb_api_key)
             return self.health_status.copy()
 
     # ######################################
@@ -963,7 +1390,8 @@ class PhishDetector:
         except Exception:
             effective_sensitivity = int(self.server_sensitivity)
         effective_sensitivity = max(50, min(100, effective_sensitivity))
-        phish_threshold = int(round(max(50, min(95, 100 - (effective_sensitivity * 0.5)))))
+        # Higher sensitivity lowers threshold, but keep enough margin to reduce false positives.
+        phish_threshold = int(round(max(58, min(92, 110 - (effective_sensitivity * 0.5)))))
 
         cache_key = self._cache_key(target_host, effective_sensitivity)
         cached = self._cache_get(cache_key)
@@ -971,9 +1399,10 @@ class PhishDetector:
             return self._to_lite_result(cached) if lite else cached
 
         with self.list_lock:
-            in_blacklist = target_host in self.user_blacklist
-            in_user_trusted = target_host in self.user_trusted
-            in_global_trusted = target_host in self.trusted_global
+            in_blacklist, matched_blacklist = self._host_or_parent_in_set(target_host, self.user_blacklist)
+            in_user_trusted, matched_user_trusted = self._host_or_parent_in_set(target_host, self.user_trusted)
+            in_global_trusted, matched_global_trusted = self._host_or_parent_in_set(target_host, self.trusted_global)
+            in_threat_feed, matched_threat = self._host_or_parent_in_set(target_host, self.threat_feed)
 
         if in_blacklist:
             blacklisted = {
@@ -981,7 +1410,7 @@ class PhishDetector:
                 "domain": target_host,
                 "probability": 100,
                 "similar_to": None,
-                "reasons": ["Force blocked by blacklist"],
+                "reasons": [f"Force blocked by blacklist ({matched_blacklist})"] if matched_blacklist else ["Force blocked by blacklist"],
                 "indicators": [],
                 "sensitivity": effective_sensitivity,
                 "user_sensitivity": user_sensitivity,
@@ -991,13 +1420,29 @@ class PhishDetector:
             self._cache_set(cache_key, blacklisted)
             return self._to_lite_result(blacklisted) if lite else blacklisted
 
+        if in_threat_feed:
+            threat_hit = {
+                "is_phishing": True,
+                "domain": target_host,
+                "probability": 99,
+                "similar_to": None,
+                "reasons": [f"Known malicious domain (threat feed: {matched_threat})"] if matched_threat else ["Known malicious domain (threat feed)"],
+                "indicators": [],
+                "sensitivity": effective_sensitivity,
+                "user_sensitivity": user_sensitivity,
+                "threshold": phish_threshold,
+            }
+            self.add_report(target_url, target_host, 99, "N/A", threat_hit["reasons"])
+            self._cache_set(cache_key, threat_hit)
+            return self._to_lite_result(threat_hit) if lite else threat_hit
+
         if in_user_trusted or in_global_trusted:
             trusted_result = {
                 "is_phishing": False,
                 "domain": target_host,
                 "probability": 0,
                 "similar_to": None,
-                "reasons": ["Trusted by user"] if in_user_trusted else ["Trusted globally"],
+                "reasons": [f"Trusted by user ({matched_user_trusted})"] if in_user_trusted else [f"Trusted globally ({matched_global_trusted})"],
                 "indicators": [],
                 "sensitivity": effective_sensitivity,
                 "user_sensitivity": user_sensitivity,
@@ -1006,14 +1451,20 @@ class PhishDetector:
             self._cache_set(cache_key, trusted_result)
             return self._to_lite_result(trusted_result) if lite else trusted_result
 
-        if not self.ml_model.is_healthy:
-            raise HTTPException(status_code=503, detail={"error": "ML Model unavailable", "message": "DL model failed."})
-
-        indicators = [] if lite else _url_indicators(target_url, target_host)
+        scoring_indicators = _url_indicators(target_url, target_host)
+        indicators = [] if lite else list(scoring_indicators)
+        heuristic_risk = self._heuristic_risk(target_url, target_host, scoring_indicators)
         candidates = self._candidate_domains(target_host)
+        brand_boost, brand_like_domain = self._brand_injection_signal(target_host, candidates)
 
         try:
-            def _blocking_check(sensitivity_level: int, threshold_level: int):
+            def _blocking_check(
+                sensitivity_level: int,
+                threshold_level: int,
+                heuristic_score: int,
+                brand_score: int,
+                brand_hint_domain: Optional[str],
+            ):
                 max_similarity = 0
                 most_similar_trusted: Optional[str] = None
 
@@ -1023,7 +1474,7 @@ class PhishDetector:
                             target_host,
                             candidates,
                             scorer=fuzz.WRatio,
-                            score_cutoff=60,
+                            score_cutoff=45,
                         )
                         if best:
                             most_similar_trusted = best[0]
@@ -1031,7 +1482,7 @@ class PhishDetector:
                     else:
                         for trusted_host in candidates:
                             sim = self._similarity(target_host, trusted_host)
-                            if sim < 60:
+                            if sim < 45:
                                 continue
                             if sim > max_similarity:
                                 max_similarity = sim
@@ -1041,13 +1492,16 @@ class PhishDetector:
                 probability = 0
                 reasons: List[str] = []
 
-                if max_similarity >= 60 and most_similar_trusted:
+                if max_similarity >= 45 and most_similar_trusted:
                     ml_risk_score = self.ml_model.predict_risk(target_host, most_similar_trusted, max_similarity)
                     sensitivity_multiplier = 0.5 + (sensitivity_level - 50) * 0.02
                     adjusted_risk_score = min(1.0, ml_risk_score * sensitivity_multiplier)
                     remaining_gap = 100 - max_similarity
                     boost_to_add = remaining_gap * adjusted_risk_score
-                    probability = int(round(max_similarity + boost_to_add))
+                    heuristic_boost = min(20.0, heuristic_score * 0.35)
+                    brand_bonus = min(18.0, float(brand_score))
+                    probability = int(round(max_similarity + boost_to_add + heuristic_boost + brand_bonus))
+                    probability = max(0, min(100, probability))
 
                     if probability >= threshold_level:
                         is_phishing = True
@@ -1056,18 +1510,39 @@ class PhishDetector:
                     if not lite:
                         reasons.append(f"Fuzzy Match: {max_similarity}% (to {most_similar_trusted})")
                         reasons.append(f"ML Risk Score: {ml_risk_score:.2f} (Gap-Fill Boost: +{boost_to_add:.1f}%)")
+                        reasons.append(f"Heuristic Boost: +{heuristic_boost:.1f}%")
+                        if brand_score > 0 and brand_hint_domain:
+                            reasons.append(f"Brand Injection Boost: +{brand_bonus:.1f}% (brand: {brand_hint_domain})")
                         if is_phishing:
                             reasons.append(f"Final ({probability}%) >= Threshold ({threshold_level}%)")
                         else:
                             reasons.append(f"Final ({probability}%) < Threshold ({threshold_level}%)")
-                elif not lite:
-                    reasons.append("No trusted domain similar enough (>60%) found.")
+                else:
+                    # No strong brand similarity: rely on heuristic score.
+                    probability = int(max(0, min(100, heuristic_score + brand_score)))
+                    if probability >= threshold_level:
+                        is_phishing = True
+                    if brand_score > 0 and brand_hint_domain and not most_similar_trusted:
+                        most_similar_trusted = brand_hint_domain
+                    if not lite:
+                        reasons.append("No trusted domain similar enough (>45%) found.")
+                        reasons.append(f"Heuristic Risk: {heuristic_score}%")
+                        if brand_score > 0 and brand_hint_domain:
+                            reasons.append(f"Brand token matched with extra suspicious terms: {brand_hint_domain} (+{brand_score}%)")
 
                 return is_phishing, probability, most_similar_trusted, reasons
 
             is_phishing, probability, most_similar_trusted, reasons = await asyncio.to_thread(
-                _blocking_check, effective_sensitivity, phish_threshold
+                _blocking_check, effective_sensitivity, phish_threshold, heuristic_risk, brand_boost, brand_like_domain
             )
+
+            # Optional high-confidence external check for borderline suspicious URLs.
+            if (not lite) and (not is_phishing) and probability >= max(35, phish_threshold - 8):
+                gsb_result = await self._check_google_safe_browsing(target_url)
+                if gsb_result and gsb_result[0]:
+                    is_phishing = True
+                    probability = max(probability, 97)
+                    reasons.append(f"Google Safe Browsing match: {gsb_result[1]}")
 
             if indicators:
                 reasons.extend([f"Indicator: {i}" for i in indicators])
@@ -1102,6 +1577,45 @@ class PhishDetector:
 
 # --- Initialize the Detector Core ---
 detector = PhishDetector()
+check_rate_limiter = SlidingWindowRateLimiter(RATE_LIMIT_CHECK_PER_MIN, 60)
+batch_rate_limiter = SlidingWindowRateLimiter(RATE_LIMIT_BATCH_PER_MIN, 60)
+login_rate_limiter = SlidingWindowRateLimiter(RATE_LIMIT_LOGIN_PER_5MIN, 5 * 60)
+scan_rate_limiter = SlidingWindowRateLimiter(max(20, RATE_LIMIT_BATCH_PER_MIN * 2), 60)
+
+def _enforce_rate_limit(request: Request, limiter: SlidingWindowRateLimiter, scope: str, cost: int = 1):
+    key = f"{scope}:{_client_ip(request)}"
+    allowed, retry_after = limiter.allow(key, cost=cost)
+    if allowed:
+        return
+    raise HTTPException(
+        status_code=429,
+        detail=f"Too many requests for {scope}. Retry later.",
+        headers={"Retry-After": str(retry_after)},
+    )
+
+def _session_actor(request: Request) -> str:
+    username = request.session.get("username") if hasattr(request, "session") else None
+    if not username:
+        return "anonymous"
+    if request.session.get("is_admin"):
+        return f"admin:{username}"
+    return f"user:{username}"
+
+async def _audit(request: Request, action: str, target: str = "", meta: Optional[Dict[str, Any]] = None):
+    global mongo_store
+    if not mongo_store:
+        return
+    try:
+        await mongo_store.add_audit_log(
+            actor=_session_actor(request),
+            action=action,
+            target=target,
+            meta=meta,
+            ip=_client_ip(request),
+        )
+    except Exception:
+        # Audit logging must never break the request path.
+        pass
 
 @app.on_event("startup")
 async def startup_event():
@@ -1120,7 +1634,11 @@ async def startup_event():
 async def require_authenticated(request: Request):
     """Dependency to check if user is logged in (admin or normal)."""
     if not request.session.get("authenticated"):
-        raise RedirectResponse(url=app.url_path_for("login"), status_code=status.HTTP_302_FOUND)
+        raise HTTPException(
+            status_code=status.HTTP_303_SEE_OTHER,
+            detail="Authentication required",
+            headers={"Location": app.url_path_for("login")},
+        )
     return request.session
 
 async def require_admin(request: Request):
@@ -1130,7 +1648,11 @@ async def require_admin(request: Request):
         # If authenticated but NOT admin, redirect to LOGIN page
         # to allow them to log in as an admin.
         print(f"Admin access denied for user: {session.get('username')}. Redirecting to login.")
-        raise RedirectResponse(url=app.url_path_for("login"), status_code=status.HTTP_302_FOUND)
+        raise HTTPException(
+            status_code=status.HTTP_303_SEE_OTHER,
+            detail="Admin access required",
+            headers={"Location": app.url_path_for("login")},
+        )
     return session.get("username")
 
 
@@ -1143,6 +1665,8 @@ async def ping():
             "trusted_count": list_data["global_count"],
             "user_trusted_count": len(list_data["user_trusted"]),
             "user_blacklist_count": len(list_data["user_blacklist"]), # --- NEW ---
+            "threat_feed_count": len(detector.threat_feed),
+            "gsb_enabled": bool(detector.gsb_api_key),
             "server_sensitivity": detector.server_sensitivity,
             "fuzzy_lib": FUZZY_LIB,
             "health": health}
@@ -1150,6 +1674,7 @@ async def ping():
 # --- Core Check API (unchanged) ---
 @app.post("/check_link")
 async def check_link_api(request: Request):
+    _enforce_rate_limit(request, check_rate_limiter, "check_link")
     try:
         data = await request.json()
         url = data.get("url")
@@ -1157,9 +1682,53 @@ async def check_link_api(request: Request):
         lite = bool(data.get("lite", False))
     except Exception: return JSONResponse({"error": "Invalid JSON"}, status_code=400)
     if not url: return JSONResponse({"error": "URL not provided"}, status_code=400)
-    try: result = await detector.check_link(url, user_sensitivity, lite=lite); return JSONResponse(result)
-    except HTTPException as he: return JSONResponse(he.detail, status_code=he.status_code)
+    try:
+        result = await detector.check_link(url, user_sensitivity, lite=lite)
+        return JSONResponse(result)
+    except HTTPException as he:
+        return JSONResponse(he.detail, status_code=he.status_code, headers=getattr(he, "headers", None))
     except Exception: return JSONResponse({"is_phishing": False, "error": "Internal API error"}, status_code=500)
+
+@app.post("/check_batch")
+async def check_batch_api(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    items = data.get("items")
+    default_sensitivity = data.get("user_sensitivity")
+    lite = bool(data.get("lite", False))
+
+    if not isinstance(items, list) or not items:
+        return JSONResponse({"error": "items must be a non-empty list"}, status_code=400)
+    if len(items) > MAX_BATCH_ITEMS:
+        return JSONResponse({"error": f"Batch too large (max {MAX_BATCH_ITEMS})"}, status_code=400)
+
+    _enforce_rate_limit(request, batch_rate_limiter, "check_batch", cost=max(1, len(items) // 8))
+
+    sem = asyncio.Semaphore(max(1, CHECK_BATCH_CONCURRENCY))
+    async def _run_one(item: Dict[str, Any]):
+        url = item.get("url") if isinstance(item, dict) else None
+        if not url:
+            return {"is_phishing": False, "domain": "", "probability": 0, "error": "missing_url"}
+        sensitivity = item.get("user_sensitivity", default_sensitivity) if isinstance(item, dict) else default_sensitivity
+        async with sem:
+            return await detector.check_link(url, sensitivity, lite=lite)
+
+    try:
+        results = await asyncio.gather(*[_run_one(i) for i in items], return_exceptions=True)
+        normalized = []
+        for res in results:
+            if isinstance(res, Exception):
+                normalized.append({"is_phishing": False, "domain": "", "probability": 0, "error": "internal_error"})
+            else:
+                normalized.append(res)
+        return JSONResponse({"results": normalized, "count": len(normalized)})
+    except HTTPException as he:
+        return JSONResponse(he.detail, status_code=he.status_code, headers=getattr(he, "headers", None))
+    except Exception:
+        return JSONResponse({"error": "Internal batch error"}, status_code=500)
 
 async def _scan_links(text: str, include_redirects: bool, caps: Dict[str, Any]) -> Dict[str, Any]:
     if include_redirects and not caps.get("panel", {}).get("redirect_chain", False):
@@ -1169,29 +1738,28 @@ async def _scan_links(text: str, include_redirects: bool, caps: Dict[str, Any]) 
     results = []
     phishing_count = 0
     safe_count = 0
+    semaphore = asyncio.Semaphore(max(2, CHECK_BATCH_CONCURRENCY))
 
     async def _scan_one(url: str):
-        res = await detector.check_link(url)
-        status = "PHISHING" if res.get("is_phishing") else "SAFE"
-        short_reason = _short_reason(res.get("reasons", []))
-        chain = await _redirect_chain(url) if include_redirects else []
-        return {
-            "url": url,
-            "domain": res.get("domain"),
-            "status": status,
-            "probability": res.get("probability", 0),
-            "similar_to": res.get("similar_to"),
-            "reasons": res.get("reasons", []),
-            "indicators": res.get("indicators", []),
-            "short_reason": short_reason,
-            "redirect_chain": chain,
-        }
-
-    for url in links:
         try:
-            item = await _scan_one(url)
+            async with semaphore:
+                res = await detector.check_link(url)
+            status = "PHISHING" if res.get("is_phishing") else "SAFE"
+            short_reason = _short_reason(res.get("reasons", []))
+            chain = await _redirect_chain(url) if include_redirects else []
+            return {
+                "url": url,
+                "domain": res.get("domain"),
+                "status": status,
+                "probability": res.get("probability", 0),
+                "similar_to": res.get("similar_to"),
+                "reasons": res.get("reasons", []),
+                "indicators": res.get("indicators", []),
+                "short_reason": short_reason,
+                "redirect_chain": chain,
+            }
         except Exception as e:
-            item = {
+            return {
                 "url": url,
                 "domain": "",
                 "status": "ERROR",
@@ -1202,7 +1770,11 @@ async def _scan_links(text: str, include_redirects: bool, caps: Dict[str, Any]) 
                 "indicators": [],
                 "redirect_chain": [],
             }
-        results.append(item)
+
+    if links:
+        results = await asyncio.gather(*[_scan_one(url) for url in links])
+
+    for item in results:
         if item["status"] == "PHISHING":
             phishing_count += 1
         elif item["status"] == "SAFE":
@@ -1224,6 +1796,7 @@ async def _scan_links(text: str, include_redirects: bool, caps: Dict[str, Any]) 
 
 @app.post("/api/scan_text", dependencies=[Depends(require_authenticated)])
 async def api_scan_text(request: Request):
+    _enforce_rate_limit(request, scan_rate_limiter, "scan_text")
     try:
         data = await request.json()
         text = data.get("text", "")
@@ -1237,10 +1810,12 @@ async def api_scan_text(request: Request):
         return JSONResponse({"error": "Insufficient rank"}, status_code=403)
 
     result = await _scan_links(text, include_redirects, caps)
+    await _audit(request, "scan_text", meta={"links_found": result.get("links_found", 0)})
     return JSONResponse(result)
 
 @app.post("/api/scan_file", dependencies=[Depends(require_authenticated)])
 async def api_scan_file(request: Request, file: UploadFile = File(...), include_redirects: bool = Form(False)):
+    _enforce_rate_limit(request, scan_rate_limiter, "scan_file")
     session = request.session
     caps = _get_caps_for_session(session)
     if not caps.get("panel", {}).get("scan_file", False):
@@ -1258,6 +1833,7 @@ async def api_scan_file(request: Request, file: UploadFile = File(...), include_
         return JSONResponse({"error": "Unable to decode file"}, status_code=400)
 
     result = await _scan_links(text, include_redirects, caps)
+    await _audit(request, "scan_file", target=file.filename or "", meta={"links_found": result.get("links_found", 0)})
     return JSONResponse(result)
 
 @app.get("/api/scan_history", dependencies=[Depends(require_authenticated)])
@@ -1284,17 +1860,107 @@ async def api_export_scan_history(request: Request):
     headers = {"Content-Disposition": "attachment; filename=scan_history.csv"}
     return HTMLResponse(content=csv_data, headers=headers, media_type="text/csv")
 
+@app.post("/api/feedback", dependencies=[Depends(require_authenticated)])
+async def api_feedback(request: Request):
+    global mongo_store
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    label = str(data.get("label", "")).strip().lower()
+    if label not in {"phishing", "not_phishing"}:
+        return JSONResponse({"error": "label must be phishing or not_phishing"}, status_code=400)
+
+    url = str(data.get("url", "")).strip()
+    if not url:
+        return JSONResponse({"error": "url is required"}, status_code=400)
+
+    domain = detector._normalize_host(url)
+    payload = {
+        "url": url,
+        "domain": domain,
+        "label": label,
+        "source": str(data.get("source", "panel"))[:40],
+        "predicted_is_phishing": bool(data.get("predicted_is_phishing", False)),
+        "predicted_probability": int(data.get("predicted_probability", 0) or 0),
+        "reason": str(data.get("reason", ""))[:300],
+        "username": request.session.get("username"),
+    }
+    if mongo_store:
+        await mongo_store.add_feedback(payload)
+    await _audit(request, "feedback_submit", target=domain, meta={"label": label, "source": payload["source"]})
+    return JSONResponse({"ok": True})
+
+@app.get("/admin/audit_logs", dependencies=[Depends(require_admin)])
+async def admin_audit_logs(limit: int = 200):
+    global mongo_store
+    if not mongo_store:
+        return JSONResponse({"error": "Database not configured"}, status_code=500)
+    logs = await mongo_store.get_recent_audit_logs(limit=limit)
+    return JSONResponse({"logs": logs})
+
+@app.get("/admin/feedback", dependencies=[Depends(require_admin)])
+async def admin_feedback(limit: int = 200):
+    global mongo_store
+    if not mongo_store:
+        return JSONResponse({"error": "Database not configured"}, status_code=500)
+    rows = await mongo_store.get_feedback_recent(limit=limit)
+    return JSONResponse({"feedback": rows})
+
 # --- Public Whitelist API (unchanged for now, admin handles this via form) ---
 @app.post("/add_trusted")
 async def add_trusted_api(request: Request):
-    pass
+    if not request.session.get("authenticated"):
+        return JSONResponse({"error": "Authentication required"}, status_code=401)
+    try:
+        payload = await request.json()
+    except Exception:
+        form = await request.form()
+        payload = dict(form)
+    site = str(payload.get("site", "")).strip()
+    if not site:
+        return JSONResponse({"error": "site is required"}, status_code=400)
+    _require_panel_cap(request.session, "whitelist_manage")
+    success = await detector.add_user_trusted(site)
+    await _audit(request, "add_trusted_api", detector._normalize_host(site), meta={"success": bool(success)})
+    return JSONResponse({"ok": bool(success)})
 @app.post("/remove_trusted")
 async def remove_trusted_api(request: Request):
-    pass
+    if not request.session.get("authenticated"):
+        return JSONResponse({"error": "Authentication required"}, status_code=401)
+    try:
+        payload = await request.json()
+    except Exception:
+        form = await request.form()
+        payload = dict(form)
+    site = str(payload.get("site", "")).strip()
+    if not site:
+        return JSONResponse({"error": "site is required"}, status_code=400)
+    _require_panel_cap(request.session, "whitelist_manage")
+    success = await detector.remove_user_trusted(site)
+    await _audit(request, "remove_trusted_api", detector._normalize_host(site), meta={"success": bool(success)})
+    return JSONResponse({"ok": bool(success)})
 # --- Report API (unchanged) ---
 @app.post("/report_phish")
 async def report_phish_api(request: Request): 
-    pass
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    url = str(data.get("url", "")).strip()
+    if not url:
+        return JSONResponse({"error": "url is required"}, status_code=400)
+
+    domain = detector._normalize_host(url)
+    probability = int(data.get("probability", 100) or 100)
+    similar_to = data.get("similar_to")
+    reasons = data.get("reasons")
+    if not isinstance(reasons, list):
+        reasons = ["Reported by client"]
+    detector.add_report(url, domain, probability, similar_to, reasons)
+    return JSONResponse({"ok": True})
 # --- Index Page (unchanged) ---
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
@@ -1323,6 +1989,11 @@ async def login(request: Request):
 @app.post("/login")
 async def login_post(request: Request, username: str = Form(...), password: str = Form(...)):
     global mongo_store
+    try:
+        _enforce_rate_limit(request, login_rate_limiter, "login_form")
+    except HTTPException:
+        context = {"request": request, "error": "تعداد تلاش ورود زیاد است. کمی بعد دوباره تلاش کنید."}
+        return templates.TemplateResponse("login.html", context, status_code=429)
     
     if not mongo_store:
         return templates.TemplateResponse("login.html", {"request": request, "error": "Database not configured."}, status_code=500)
@@ -1338,11 +2009,13 @@ async def login_post(request: Request, username: str = Form(...), password: str 
             request.session["display_name"] = admin_user_data.get("display_name", username) # Store display name
             request.session["rank"] = "admin"
             print(f"Admin login successful: {username}")
+            await _audit(request, "login_success_admin", username)
             return RedirectResponse(url=app.url_path_for("admin"), status_code=status.HTTP_302_FOUND)
         else:
             # Admin user found, but password was wrong. FAIL immediately.
             # Do NOT proceed to check the normal user list.
             print(f"Admin login failed (wrong password): {username}")
+            await _audit(request, "login_failed_admin_password", username)
             context = {"request": request, "error": "نام کاربری یا رمز عبور اشتباه است."}
             return templates.TemplateResponse("login.html", context, status_code=401)
 
@@ -1355,10 +2028,12 @@ async def login_post(request: Request, username: str = Form(...), password: str 
         request.session["username"] = username # Store username
         request.session["display_name"] = normal_user_data.get("display_name", username) # Store display name
         request.session["rank"] = _normalize_rank(normal_user_data.get("rank"))
+        await _audit(request, "login_success_user", username)
         return RedirectResponse(url=app.url_path_for("user_panel"), status_code=status.HTTP_302_FOUND)
 
     # 3. Failed (User not in admin list AND (not in normal list OR wrong pass for normal list))
     print(f"Login failed for user: {username}")
+    await _audit(request, "login_failed", username)
     context = {"request": request, "error": "نام کاربری یا رمز عبور اشتباه است."}
     return templates.TemplateResponse("login.html", context, status_code=401)
 
@@ -1367,6 +2042,7 @@ async def login_post(request: Request, username: str = Form(...), password: str 
 @app.post("/api/extension_login")
 async def api_extension_login(request: Request):
     global mongo_store
+    _enforce_rate_limit(request, login_rate_limiter, "extension_login")
     try:
         data = await request.json()
         username = data.get("username")
@@ -1382,6 +2058,12 @@ async def api_extension_login(request: Request):
     if user_data and user_data.get("password") == password:
         rank = _normalize_rank(user_data.get("rank"))
         caps = RANK_CAPS[rank]
+        await mongo_store.add_audit_log(
+            actor=f"extension:{username}",
+            action="extension_login_success_user",
+            target=username or "",
+            ip=_client_ip(request),
+        )
         return JSONResponse({
             "success": True,
             "displayName": user_data.get("display_name", username),
@@ -1389,24 +2071,37 @@ async def api_extension_login(request: Request):
             "isAdmin": False,
             "capabilities": caps,
         })
-        
+
     # Optional: Allow admins to log in to extension as well
     admin_data = await mongo_store.get_admin_user(username)
     if admin_data and admin_data.get("password") == password:
-         return JSONResponse({
-             "success": True,
-             "displayName": admin_data.get("display_name", username) + " (Admin)",
-             "rank": "admin",
-             "isAdmin": True,
-             "capabilities": RANK_CAPS["admin"],
-         })
+        await mongo_store.add_audit_log(
+            actor=f"extension:{username}",
+            action="extension_login_success_admin",
+            target=username or "",
+            ip=_client_ip(request),
+        )
+        return JSONResponse({
+            "success": True,
+            "displayName": admin_data.get("display_name", username) + " (Admin)",
+            "rank": "admin",
+            "isAdmin": True,
+            "capabilities": RANK_CAPS["admin"],
+        })
 
-    return JSONResponse({"success": False, "error": "نام کاربری یا رمز عبور اشتباه است."}, status_code=401)
+    await mongo_store.add_audit_log(
+        actor=f"extension:{username or 'unknown'}",
+        action="extension_login_failed",
+        target=username or "",
+        ip=_client_ip(request),
+    )
+    return JSONResponse({"success": False, "error": "Username or password is incorrect."}, status_code=401)
 
 
 @app.get("/logout")
 async def logout(request: Request):
     username = request.session.get("username", "Unknown")
+    await _audit(request, "logout", username)
     request.session.clear() # Clear all session data
     print(f"User logout: {username}")
     return RedirectResponse(url=app.url_path_for("index"), status_code=status.HTTP_302_FOUND)
@@ -1483,6 +2178,7 @@ async def admin_upload_extension(request: Request, extension_file: UploadFile = 
         await asyncio.to_thread(_save_file_and_cleanup)
         await detector.set_extension_filename(safe_filename)
         print(f"Extension file uploaded: {safe_filename}")
+        await _audit(request, "upload_extension", safe_filename, meta={"bytes": len(contents)})
     except Exception as e: print(f"File upload failed: {e}")
     return RedirectResponse(url=app.url_path_for("admin"), status_code=status.HTTP_302_FOUND)
 
@@ -1495,6 +2191,7 @@ async def admin_upload_extension(request: Request, extension_file: UploadFile = 
 async def admin_add_trusted_form(request: Request, site: str = Form(...)):
     _require_panel_cap(request.session, "whitelist_manage")
     success = await detector.add_user_trusted(site)
+    await _audit(request, "add_trusted", detector._normalize_host(site), meta={"success": bool(success)})
     print(f"User {request.session.get('username')} added trusted: {site} (Success: {success})")
     # Redirect back to REFERER (admin or userpanel)
     redirect_url = request.headers.get("referer", app.url_path_for("admin"))
@@ -1504,6 +2201,7 @@ async def admin_add_trusted_form(request: Request, site: str = Form(...)):
 async def admin_remove_trusted_form(request: Request, site: str = Form(...)):
     _require_panel_cap(request.session, "whitelist_manage")
     success = await detector.remove_user_trusted(site)
+    await _audit(request, "remove_trusted", detector._normalize_host(site), meta={"success": bool(success)})
     print(f"User {request.session.get('username')} removed trusted: {site} (Success: {success})")
     redirect_url = request.headers.get("referer", app.url_path_for("admin"))
     return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
@@ -1513,6 +2211,7 @@ async def admin_remove_trusted_form(request: Request, site: str = Form(...)):
 async def admin_add_blacklist_form(request: Request, site: str = Form(...)):
     _require_panel_cap(request.session, "blacklist_manage")
     success = await detector.add_user_blacklist(site)
+    await _audit(request, "add_blacklist", detector._normalize_host(site), meta={"success": bool(success)})
     print(f"User {request.session.get('username')} added blacklist: {site} (Success: {success})")
     redirect_url = request.headers.get("referer", app.url_path_for("admin"))
     return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
@@ -1521,6 +2220,7 @@ async def admin_add_blacklist_form(request: Request, site: str = Form(...)):
 async def admin_remove_blacklist_form(request: Request, site: str = Form(...)):
     _require_panel_cap(request.session, "blacklist_manage")
     success = await detector.remove_user_blacklist(site)
+    await _audit(request, "remove_blacklist", detector._normalize_host(site), meta={"success": bool(success)})
     print(f"User {request.session.get('username')} removed blacklist: {site} (Success: {success})")
     redirect_url = request.headers.get("referer", app.url_path_for("admin"))
     return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
@@ -1530,6 +2230,7 @@ async def admin_remove_blacklist_form(request: Request, site: str = Form(...)):
 @app.post("/admin/set_sensitivity", dependencies=[Depends(require_admin)])
 async def admin_set_sensitivity(request: Request, sensitivity: int = Form(...)):
     await detector.set_server_sensitivity(sensitivity)
+    await _audit(request, "set_sensitivity", meta={"value": int(sensitivity)})
     return RedirectResponse(url=app.url_path_for("admin"), status_code=status.HTTP_302_FOUND)
 
 # --- NEW --- Manual Analyze endpoint (ADMIN ONLY)
@@ -1541,6 +2242,7 @@ async def admin_analyze_url(request: Request):
     try:
         # We don't need user sensitivity here, use server default
         result = await detector.check_link(url)
+        await _audit(request, "admin_analyze_url", detector._normalize_host(url), meta={"probability": result.get("probability", 0)})
         return JSONResponse(result)
     except HTTPException as he: return JSONResponse(he.detail, status_code=he.status_code)
     except Exception as e: return JSONResponse({"is_phishing": False, "error": f"Analysis error: {e}"}, status_code=500)
@@ -1586,6 +2288,7 @@ async def admin_add_user(request: Request,
         print(f"Add admin user failed: {new_username} already exists.")
     else:
         print(f"Admin user added: {new_username}")
+    await _audit(request, "add_admin_user", new_username, meta={"success": bool(added)})
     return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND) # Redirect back to system tab
 
 @app.post("/admin/remove_user", dependencies=[Depends(require_admin)])
@@ -1608,6 +2311,7 @@ async def admin_remove_user(request: Request, username_to_remove: str = Form(...
         print(f"Admin user removed: {username_to_remove}")
     else:
         print(f"Remove admin user failed: {username_to_remove} not found.")
+    await _audit(request, "remove_admin_user", username_to_remove, meta={"success": bool(removed)})
 
     return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
@@ -1630,6 +2334,7 @@ async def admin_add_normal_user(request: Request,
         print(f"Add normal user failed: {new_normal_username} already exists.")
     else:
         print(f"Normal user added: {new_normal_username}")
+    await _audit(request, "add_normal_user", new_normal_username, meta={"success": bool(added), "rank": _normalize_rank(normal_rank)})
     return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
 @app.post("/admin/remove_normal_user", dependencies=[Depends(require_admin)])
@@ -1643,6 +2348,7 @@ async def admin_remove_normal_user(request: Request, username_to_remove_normal: 
         print(f"Normal user removed: {username_to_remove_normal}")
     else:
         print(f"Remove normal user failed: {username_to_remove_normal} not found.")
+    await _audit(request, "remove_normal_user", username_to_remove_normal, meta={"success": bool(removed)})
 
     return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
@@ -1660,6 +2366,7 @@ async def admin_update_normal_user_rank(
         print(f"Normal user rank updated: {username_to_update} -> {_normalize_rank(normal_rank)}")
     else:
         print(f"Update rank failed: {username_to_update} not found.")
+    await _audit(request, "update_normal_user_rank", username_to_update, meta={"success": bool(updated), "rank": _normalize_rank(normal_rank)})
 
     return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
