@@ -1,45 +1,45 @@
-/* static/style.css - نهایی و بسیار مدرن */
+/* سبک‌های مشترک پنل؛ سعی شده خوانا، تمیز و قابل نگهداری بماند. */
 
 /* ---------------------------------------------------------------------- */
-/* 1. Global Variables (Light Theme) */
+/* رنگ‌های پایه برای حالت روشن */
 /* ---------------------------------------------------------------------- */
 :root {
-    --primary-color: #3f51b5; /* Deep Blue - Brand color */
+    --primary-color: #3f51b5; /* رنگ اصلی برند */
     --primary-dark: #303f9f;
-    --secondary-color: #90a4ae; /* Muted Grey */
+    --secondary-color: #90a4ae; /* خاکستری ملایم */
     --success-color: #4caf50;
-    --danger-color: #e91e63; /* Vibrant Pink/Red */
+    --danger-color: #e91e63; /* رنگ هشدار و خطر */
     --warning-color: #ff9800;
-    
-    --background-color: #f7f9fc; /* Lightest Background */
+
+    --background-color: #f7f9fc; /* پس‌زمینه روشن */
     --card-background: #ffffff;
-    --text-color: #263238; /* Dark Text */
+    --text-color: #263238; /* متن اصلی */
     --border-color: #e0e0e0;
     --shadow-color: rgba(0,0,0,0.08);
 }
 
 /* ---------------------------------------------------------------------- */
-/* 2. Dark Mode Configuration */
+/* تنظیمات حالت تاریک */
 /* ---------------------------------------------------------------------- */
 @media (prefers-color-scheme: dark) {
     :root {
-        --primary-color: #7986cb; /* Lighter Blue for visibility */
+        --primary-color: #7986cb; /* آبی روشن‌تر برای خوانایی بهتر */
         --primary-dark: #5c6bc0;
         --secondary-color: #90a4ae;
         --success-color: #81c784;
         --danger-color: #f06292;
         --warning-color: #ffb74d;
-        
-        --background-color: #121212; /* Very Dark Background */
+
+        --background-color: #121212; /* پس‌زمینه تیره */
         --card-background: #1e1e1e;
-        --text-color: #e0e0e0; /* Light Text */
+        --text-color: #e0e0e0; /* متن روشن */
         --border-color: #333333;
         --shadow-color: rgba(0,0,0,0.4);
     }
 }
 
 /* ---------------------------------------------------------------------- */
-/* 3. Base & Typography */
+/* پایه صفحه و تایپوگرافی */
 /* ---------------------------------------------------------------------- */
 @font-face {
     font-family: 'Vazirmatn';
@@ -54,12 +54,12 @@ body {
     color: var(--text-color);
     margin: 0;
     padding-top: 30px;
-    direction: rtl; 
+    direction: rtl;
     text-align: right;
-    transition: background-color 0.3s, color 0.3s; /* Smooth theme transition */
+    transition: background-color 0.3s, color 0.3s; /* تغییر نرم بین تم‌ها */
 }
 
-/* Ensure headings have a consistent, modern look */
+/* تیترها در همه بخش‌ها یکدست و مرتب دیده شوند. */
 h1, h2, h3 {
     color: var(--text-color);
     font-weight: 700;
@@ -67,12 +67,12 @@ h1, h2, h3 {
 
 .container {
     width: 95%;
-    max-width: 1500px; /* Slightly wider dashboard */
+    max-width: 1500px; /* داشبورد کمی فضای بیشتری لازم دارد. */
     margin: 0 auto;
 }
 
 /* ---------------------------------------------------------------------- */
-/* 4. Header & Navigation */
+/* هدر و ناوبری */
 /* ---------------------------------------------------------------------- */
 header {
     background-color: var(--card-background);
@@ -80,7 +80,7 @@ header {
     border-bottom: 1px solid var(--border-color);
     margin-bottom: 30px;
     box-shadow: 0 4px 12px var(--shadow-color);
-    display: flex; /* For better layout control */
+    display: flex; /* کنترل بهتر چیدمان هدر */
     justify-content: space-between;
     align-items: center;
 }
@@ -91,14 +91,14 @@ nav a {
     font-weight: 600;
     position: relative;
 }
-/* Underline effect on hover */
+/* خط زیر لینک هنگام هاور */
 nav a::after {
     content: '';
     position: absolute;
     width: 0;
     height: 3px;
     bottom: -8px;
-    right: 0; /* Right for RTL */
+    right: 0; /* هماهنگ با راست‌به‌چپ بودن صفحه */
     background-color: var(--danger-color);
     transition: width 0.3s ease-out;
 }
@@ -107,12 +107,12 @@ nav a:hover::after {
 }
 
 /* ---------------------------------------------------------------------- */
-/* 5. Cards & Layout */
+/* کارت‌ها و چیدمان اصلی */
 /* ---------------------------------------------------------------------- */
 .card {
     background-color: var(--card-background);
-    border: 1px solid var(--border-color); /* Added border for definition */
-    border-radius: 16px; /* Super rounded corners */
+    border: 1px solid var(--border-color); /* مرز ظریف برای جدا شدن کارت از پس‌زمینه */
+    border-radius: 16px; /* گوشه‌های نرم‌تر برای حس مدرن‌تر */
     padding: 30px;
     margin-bottom: 30px;
     box-shadow: 0 10px 30px var(--shadow-color);
@@ -120,8 +120,8 @@ nav a:hover::after {
 }
 
 .card:hover {
-    transform: translateY(-5px); /* Stronger lift effect */
-    box-shadow: 0 15px 40px var(--shadow-color); 
+    transform: translateY(-5px); /* کمی بالا آمدن کارت هنگام هاور */
+    box-shadow: 0 15px 40px var(--shadow-color);
 }
 
 .card h2 {
@@ -136,11 +136,11 @@ nav a:hover::after {
 }
 
 /* ---------------------------------------------------------------------- */
-/* 6. Forms & Controls */
+/* فرم‌ها و کنترل‌ها */
 /* ---------------------------------------------------------------------- */
-input[type="text"], 
-input[type="password"], 
-input[type="file"], /* Added file input styling */
+input[type="text"],
+input[type="password"],
+input[type="file"], /* فایل هم مثل بقیه ورودی‌ها دیده شود */
 input[type="range"] {
     padding: 12px;
     border-radius: 10px;
@@ -154,11 +154,11 @@ input[type="range"] {
     transition: border-color 0.3s, box-shadow 0.3s;
 }
 
-input[type="text"]:focus, 
-input[type="password"]:focus, 
+input[type="text"]:focus,
+input[type="password"]:focus,
 input[type="file"]:focus {
     border-color: var(--primary-color);
-    box-shadow: 0 0 0 3px rgba(63, 81, 181, 0.3); /* Focus Ring */
+    box-shadow: 0 0 0 3px rgba(63, 81, 181, 0.3); /* حلقه فوکوس برای دسترسی‌پذیری */
     outline: none;
 }
 
@@ -190,14 +190,14 @@ button:active, .button:active {
     box-shadow: none;
 }
 
-/* Specific Button Styles */
+/* رنگ‌بندی دکمه‌های خاص */
 .btn-danger { background-color: var(--danger-color); }
 .btn-danger:hover { background-color: #c51152; }
 .btn-success { background-color: var(--success-color); }
 .btn-success:hover { background-color: #388e3c; }
 
 /* ---------------------------------------------------------------------- */
-/* 7. Table Styling (Data Grid) */
+/* جدول‌ها و نمایش داده‌ها */
 /* ---------------------------------------------------------------------- */
 table {
     width: 100%;
@@ -205,7 +205,7 @@ table {
     border-spacing: 0;
     margin-top: 15px;
     overflow: hidden;
-    border-radius: 12px; /* Consistent with cards */
+    border-radius: 12px; /* هماهنگ با گردی کارت‌ها */
     box-shadow: 0 4px 10px var(--shadow-color);
 }
 th, td {
@@ -214,7 +214,7 @@ th, td {
     text-align: right;
 }
 th {
-    background-color: var(--primary-dark); /* Darker header */
+    background-color: var(--primary-dark); /* هدر جدول خواناتر باشد */
     color: white;
     font-weight: 700;
     border-bottom: 2px solid var(--primary-color);
@@ -225,7 +225,7 @@ tr:nth-child(even) {
     background-color: rgba(0, 0, 0, 0.01);
 }
 tr:hover {
-    background-color: rgba(0, 0, 0, 0.03); /* Hover effect */
+    background-color: rgba(0, 0, 0, 0.03); /* واکنش آرام ردیف هنگام هاور */
     transition: background-color 0.15s;
 }
 tr:last-child td {
@@ -240,20 +240,20 @@ td code {
 }
 
 /* ---------------------------------------------------------------------- */
-/* 8. Utility & Layout */
+/* ابزارک‌ها و چیدمان‌های کمکی */
 /* ---------------------------------------------------------------------- */
 .error-message {
     color: var(--danger-color);
     margin-bottom: 20px;
     padding: 15px;
-    background-color: rgba(233, 30, 99, 0.1); /* Lighter background using danger color opacity */
+    background-color: rgba(233, 30, 99, 0.1); /* پس‌زمینه کم‌رنگ بر اساس رنگ خطر */
     border: 1px solid var(--danger-color);
     border-radius: 10px;
     font-weight: 600;
 }
 .admin-grid {
     display: grid;
-    grid-template-columns: 1fr 2fr; /* Optimized column ratio */
+    grid-template-columns: 1fr 2fr; /* نسبت ستون‌ها برای پنل مدیریت بهتر است */
     gap: 30px;
 }
 .trusted-list {

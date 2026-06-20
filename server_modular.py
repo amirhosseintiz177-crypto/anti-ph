@@ -16,11 +16,12 @@ import zipfile
 import copy
 import uuid
 import fnmatch
+import hashlib
+import secrets
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Set, Optional, Tuple
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi import FastAPI, HTTPException, Request, Form, Depends, status, UploadFile, File
-# --- NEW --- Import FileResponse for backups
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -28,9 +29,6 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 import uvicorn
 import numpy as np
-# --- NEW --- Import password hashing library (important for real use!)
-# For , we won't implement hashing now, but you SHOULD use it.
-# import hashlib # Example using built-in hashlib
 
 # Fuzzy
 try:
@@ -56,7 +54,7 @@ except ImportError:
     TF_AVAILABLE = False
     print("Warning: TensorFlow not found. ML model features will be simulated.")
 
-# --- Setup ---
+# Application paths and runtime configuration
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("PHISH_DATA_DIR", "").strip()
@@ -64,7 +62,7 @@ DEFAULT_THREAT_FEED_SOURCES = [
     "https://raw.githubusercontent.com/openphish/public_feed/refs/heads/main/feed.txt",
 ]
 DEFAULT_TRUSTED_SOURCES = [
-    # Tranco latest list metadata endpoint (resolved to latest CSV/ZIP download dynamically).
+    # Tranco exposes the newest list through metadata, so the real CSV/ZIP URL is resolved at refresh time.
     "https://tranco-list.eu/api/lists/date/latest",
 ]
 
@@ -114,9 +112,7 @@ EXTRA_THREAT_FEED_SOURCES = [
     if u.strip()
 ]
 THREAT_FEED_SOURCE_LIST = list(dict.fromkeys(DEFAULT_THREAT_FEED_SOURCES + EXTRA_THREAT_FEED_SOURCES))
-# --- REMOVED --- Single admin user/pass from env vars - now managed in file
-# ADMIN_USER = os.environ.get("PHISH_ADMIN_USER", "admin")
-# ADMIN_PASS = os.environ.get("PHISH_ADMIN_PASS", "12345")
+# Admin and user credentials live in MongoDB so they can be managed from the panel.
 
 RANKS = ["basic", "plus", "pro"]
 DEFAULT_RANK = "basic"
@@ -548,6 +544,38 @@ class SlidingWindowRateLimiter:
                 dq.append(now)
             return True, 0
 
+
+
+PASSWORD_HASH_PREFIX = "pbkdf2_sha256$"
+
+def _hash_password(password: str) -> str:
+    """Hash a password with a per-user salt using only the Python standard library."""
+    salt = secrets.token_hex(16)
+    rounds = 210_000
+    digest = hashlib.pbkdf2_hmac("sha256", str(password).encode("utf-8"), salt.encode("utf-8"), rounds)
+    return f"{PASSWORD_HASH_PREFIX}{rounds}${salt}${digest.hex()}"
+
+def _verify_password(stored_password: str, provided_password: str) -> bool:
+    """Accept current PBKDF2 hashes and legacy plaintext values during migration."""
+    stored_password = str(stored_password or "")
+    provided_password = str(provided_password or "")
+    if not stored_password.startswith(PASSWORD_HASH_PREFIX):
+        return secrets.compare_digest(stored_password, provided_password)
+    try:
+        _, rounds_raw, salt, digest_hex = stored_password.split("$", 3)
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            provided_password.encode("utf-8"),
+            salt.encode("utf-8"),
+            int(rounds_raw),
+        ).hex()
+        return secrets.compare_digest(digest, digest_hex)
+    except Exception:
+        return False
+
+def _password_needs_upgrade(stored_password: str) -> bool:
+    return not str(stored_password or "").startswith(PASSWORD_HASH_PREFIX)
+
 def _client_ip(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for", "")
     if forwarded:
@@ -570,13 +598,13 @@ class MongoStore:
         if await self.admin_users.count_documents({}) == 0:
             await self.admin_users.insert_one({
                 "_id": "admin",
-                "password": "12345",
+                "password": _hash_password("12345"),
                 "display_name": "Default Admin",
             })
         if await self.normal_users.count_documents({}) == 0:
             await self.normal_users.insert_one({
                 "_id": "user",
-                "password": "123",
+                "password": _hash_password("123"),
                 "display_name": "Normal User",
                 "rank": DEFAULT_RANK,
                 "team": DEFAULT_TEAM,
@@ -652,7 +680,6 @@ class MongoStore:
         users = {}
         async for doc in self.admin_users.find({}):
             users[doc["_id"]] = {
-                "password": doc.get("password", ""),
                 "display_name": doc.get("display_name", doc["_id"]),
             }
         return users
@@ -661,7 +688,6 @@ class MongoStore:
         users = {}
         async for doc in self.normal_users.find({}):
             users[doc["_id"]] = {
-                "password": doc.get("password", ""),
                 "display_name": doc.get("display_name", doc["_id"]),
                 "rank": _normalize_rank(doc.get("rank")),
                 "team": _normalize_team(doc.get("team")),
@@ -674,10 +700,18 @@ class MongoStore:
             return False
         await self.admin_users.insert_one({
             "_id": username,
-            "password": password,
+            "password": _hash_password(password),
             "display_name": display_name,
         })
         return True
+
+
+    async def update_admin_password(self, username: str, password: str) -> bool:
+        result = await self.admin_users.update_one(
+            {"_id": username},
+            {"$set": {"password": _hash_password(password)}},
+        )
+        return result.matched_count > 0
 
     async def remove_admin_user(self, username: str) -> bool:
         result = await self.admin_users.delete_one({"_id": username})
@@ -692,12 +726,20 @@ class MongoStore:
             return False
         await self.normal_users.insert_one({
             "_id": username,
-            "password": password,
+            "password": _hash_password(password),
             "display_name": display_name,
             "rank": _normalize_rank(rank),
             "team": _normalize_team(team),
         })
         return True
+
+
+    async def update_normal_user_password(self, username: str, password: str) -> bool:
+        result = await self.normal_users.update_one(
+            {"_id": username},
+            {"$set": {"password": _hash_password(password)}},
+        )
+        return result.matched_count > 0
 
     async def remove_normal_user(self, username: str) -> bool:
         result = await self.normal_users.delete_one({"_id": username})
@@ -872,10 +914,10 @@ app.add_middleware(
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 
-# --- User data is stored in MongoDB (see MongoStore) ---
+# User data is stored in MongoDB through MongoStore.
 
 
-# --- MLPhishingModel Class (Unchanged) ---
+# Lightweight ML-style risk scorer. It uses TensorFlow when available and falls back safely otherwise.
 class MLPhishingModel:
     INPUT_DIM = 6
     def __init__(self):
@@ -889,7 +931,7 @@ class MLPhishingModel:
                 self.is_healthy = False
                 print(f"MLPhishingModel FAILED to load: {e}")
         else:
-            self.is_healthy = True # Allow fallback simulation
+            self.is_healthy = True  # Keep the service usable even when TensorFlow is not installed.
     def _build_keras_model(self):
         self.tf_model = Sequential([Dense(12, activation='relu', input_shape=(self.INPUT_DIM,)), Dense(6, activation='relu'), Dense(1, activation='sigmoid')])
         self.tf_model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
@@ -922,11 +964,11 @@ class MLPhishingModel:
             except Exception as e: self.is_healthy = False; print(f"ML Prediction Failed: {e}"); risk_score = 0.5
         return float(risk_score)
 
-# --- PhishDetector Class (MODIFIED) ---
+# Main phishing detector and in-memory runtime state.
 class PhishDetector:
 
     TRUSTED_CACHE = TRUSTED_GLOBAL_CACHE
-    REPO_RAW_URL = "https://s27.uupload.ir/files/09171258914/cloudflare-radar_top-1000000-domains_20251103-20251110.csv" # Or your preferred source
+    REPO_RAW_URL = "https://s27.uupload.ir/files/09171258914/cloudflare-radar_top-1000000-domains_20251103-20251110.csv"
     TRUSTED_SOURCES = list(dict.fromkeys([REPO_RAW_URL] + TRUSTED_SOURCE_LIST))
     THREAT_FEED_SOURCES = THREAT_FEED_SOURCE_LIST
     EXTENSION_UPLOAD_DIR = os.path.join(BASE_DIR, "static", "extension_files")
@@ -937,21 +979,21 @@ class PhishDetector:
     RESULT_CACHE_TTL_ERROR = 60
 
     def __init__(self):
-        # Synchronization Primitives
-        self.list_lock = threading.RLock() # --- MODIFIED --- Use RLock for trusted/blacklist
+        # Locks keep background refreshes and API requests from stepping on each other.
+        self.list_lock = threading.RLock()
         self.reports_lock = threading.Lock()
         self.timeline_lock = threading.Lock()
-        self.sensitivity_lock = threading.RLock() # Keep RLock for sensitivity
+        self.sensitivity_lock = threading.RLock()
         self.health_lock = threading.Lock()
         self.result_cache_lock = threading.Lock()
         self.gsb_cache_lock = threading.Lock()
 
-        # Data Stores
+        # Runtime data stores.
         self.trusted_global: Set[str] = set()
         self.threat_feed: Set[str] = set()
         self.user_trusted: Set[str] = set()
         self.temp_user_trusted: Dict[str, Dict[str, Any]] = {}
-        # --- NEW --- Blacklist store
+        # Manual blacklist store.
         self.user_blacklist: Set[str] = set()
         self.reports: List[Dict[str, Any]] = []
         self.domain_timeline: Dict[str, List[Dict[str, Any]]] = {}
@@ -961,7 +1003,7 @@ class PhishDetector:
         self.feedback_domain_bias: Dict[str, Dict[str, int]] = {}
         self.scan_history_lock = threading.Lock()
         self.scan_history: List[Dict[str, Any]] = []
-        self.server_sensitivity = 90 # Default sensitivity, overridden by Mongo
+        self.server_sensitivity = 90  # Mongo overrides this after startup.
 
         self.extension_filename: Optional[str] = None
         self.global_tld_index: Dict[str, Dict[str, List[str]]] = {}
@@ -987,7 +1029,7 @@ class PhishDetector:
         self._load_data_on_startup()
         print(f"PhishDetector initialized. Sensitivity: {self.server_sensitivity}%")
 
-    # --- Utility Methods (mostly unchanged, added blacklist save/load) ---
+    # Utility helpers for normalization, matching and caching.
     def _normalize_host(self, u: str) -> str:
         s = (u or "").strip().lower()
         if "://" in s: s = urllib.parse.urlparse(s).netloc
@@ -1330,20 +1372,20 @@ class PhishDetector:
 
         return min(30, best_score), best_brand_domain
 
-    # --- MODIFIED --- Generic save/load using the list_lock
+    # Small JSON helpers kept for local fallback/cache files.
     def _save_json_set(self, path: str, data: Set[str]):
-        with self.list_lock: # Protect file writing
+        with self.list_lock:
             try:
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(sorted(list(data)), f, ensure_ascii=False, indent=2)
             except Exception as e: print(f"[_save_json_set] error saving {path}: {e}")
 
     def _load_json_set(self, path: str) -> Set[str]:
-        # No lock needed for initial load, but maybe for refresh? Let's keep it simple.
+        # This is normally called during startup; refresh paths already take their own locks.
         try:
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:
-                    # Normalize during load
+                    # Normalize each row as it comes back from disk.
                     return set(self._normalize_host(d) for d in json.load(f) if self._normalize_host(d))
         except Exception as e: print(f"[_load_json_set] error loading {path}: {e}"); return set()
         return set()
@@ -1365,7 +1407,7 @@ class PhishDetector:
         if self.extension_filename: return f"/static/extension_files/{self.extension_filename}"
         return None
 
-    # --- Data Loading (MODIFIED) ---
+    # Data loading and refresh lifecycle.
     def _load_data_on_startup(self):
         self.user_trusted = set()
         self.user_blacklist = set()
@@ -1676,9 +1718,9 @@ class PhishDetector:
         while True:
             await asyncio.sleep(6 * 60 * 60)
             await self._refresh_trusted_global()
-            await self._refresh_threat_feed() # Refresh every 6 hours
+            await self._refresh_threat_feed()  # Refresh every 6 hours.
 
-    # --- Public Data Methods (MODIFIED, added blacklist methods) ---
+    # Public mutation helpers used by routes and admin actions.
     async def add_user_trusted(self, host: str) -> bool:
         host = self._normalize_host(host)
         if not host:
@@ -1709,7 +1751,7 @@ class PhishDetector:
             self._clear_result_cache()
         return updated
 
-    # --- NEW --- Blacklist add method
+    # Add a domain or wildcard pattern to the manual blacklist.
     async def add_user_blacklist(self, host: str) -> bool:
         host = self._normalize_host(host)
         if not host:
@@ -1725,7 +1767,7 @@ class PhishDetector:
             self._clear_result_cache()
         return updated
 
-    # --- NEW --- Blacklist remove method
+    # Remove a domain or wildcard pattern from the manual blacklist.
     async def remove_user_blacklist(self, host: str) -> bool:
         host = self._normalize_host(host)
         if not host:
@@ -1741,7 +1783,7 @@ class PhishDetector:
             self._clear_result_cache()
         return updated
 
-    # --- MODIFIED --- Get data includes blacklist
+    # Snapshot lists for templates and status endpoints.
     def get_list_data(self):
         self._cleanup_expired_temp_trusted()
         with self.list_lock:
@@ -1757,7 +1799,7 @@ class PhishDetector:
 
     def add_report(self, url: str, domain: str, probability: int, similar_to: Optional[str], reasons: List[str]):
         report = {"url": url, "domain": domain, "probability": probability, "similar_to": similar_to, "reasons": reasons, "time": _now_str()}
-        with self.reports_lock: self.reports.insert(0, report); self.reports = self.reports[:1000] # Keep max 1000 reports
+        with self.reports_lock: self.reports.insert(0, report); self.reports = self.reports[:1000]  # Keep the newest 1000 reports.
         self._append_domain_timeline(
             domain,
             probability=int(probability or 0),
@@ -2066,7 +2108,7 @@ class PhishDetector:
             "recent_reports": report_recent[:30],
         }
 
-    # --- NEW --- Method to clear reports
+    # Clear in-memory reports after an admin confirms purge.
     def purge_reports(self):
         with self.reports_lock:
             self.reports = []
@@ -2088,11 +2130,7 @@ class PhishDetector:
             self.health_status["temporary_trusted_count"] = len(self.temp_user_trusted)
             return self.health_status.copy()
 
-    # ######################################
-    # ### BEGINNING OF FULL CODE FIX ###
-    # ######################################
-    
-    # --- Main Detector Logic (MODIFIED FOR PRECISION) ---
+    # Main detector logic. Keep thresholds conservative so trusted domains are not flagged casually.
     async def check_link(
         self,
         target_url: str,
@@ -2349,11 +2387,7 @@ class PhishDetector:
             traceback.print_exc()
             raise HTTPException(status_code=500, detail={"error": "Processing error", "message": str(e)})
 
-    # ######################################
-    # ### END OF FULL CODE FIX ###
-    # ######################################
-
-# --- Initialize the Detector Core ---
+# Initialize the detector core.
 detector = PhishDetector()
 check_rate_limiter = SlidingWindowRateLimiter(RATE_LIMIT_CHECK_PER_MIN, 60)
 batch_rate_limiter = SlidingWindowRateLimiter(RATE_LIMIT_BATCH_PER_MIN, 60)
@@ -2408,9 +2442,7 @@ async def startup_event():
     print("FastAPI Startup: Launching async trusted list refresher.")
     asyncio.create_task(detector._trusted_refresher_worker())
 
-# --- ROUTING ---
-
-# --- MODIFIED --- Dependencies for auth
+# Routing and authentication dependencies.
 async def require_authenticated(request: Request):
     """Dependency to check if user is logged in (admin or normal)."""
     if not request.session.get("authenticated"):
@@ -2425,8 +2457,7 @@ async def require_admin(request: Request):
     """Dependency to check if user is logged in AND is an admin."""
     session = await require_authenticated(request)
     if not session.get("is_admin"):
-        # If authenticated but NOT admin, redirect to LOGIN page
-        # to allow them to log in as an admin.
+        # A signed-in normal user can still open the login page and switch into an admin session.
         print(f"Admin access denied for user: {session.get('username')}. Redirecting to login.")
         raise HTTPException(
             status_code=status.HTTP_303_SEE_OTHER,
@@ -2436,15 +2467,15 @@ async def require_admin(request: Request):
     return session.get("username")
 
 
-# --- Ping (unchanged) ---
+# Health/status endpoint used by the app, extension and uptime checks.
 @app.get("/ping")
 async def ping():
     health = detector.get_health_status()
-    list_data = detector.get_list_data() # Get counts together
+    list_data = detector.get_list_data()
     return {"status": "ok",
             "trusted_count": list_data["global_count"],
             "user_trusted_count": len(list_data["user_trusted"]),
-            "user_blacklist_count": len(list_data["user_blacklist"]), # --- NEW ---
+            "user_blacklist_count": len(list_data["user_blacklist"]),
             "temp_trusted_count": len(list_data.get("temp_user_trusted", [])),
             "threat_feed_count": len(detector.threat_feed),
             "gsb_enabled": bool(detector.gsb_api_key),
@@ -2452,7 +2483,7 @@ async def ping():
             "fuzzy_lib": FUZZY_LIB,
             "health": health}
 
-# --- Core Check API (unchanged) ---
+# Core link checking API.
 @app.post("/check_link")
 async def check_link_api(request: Request):
     _enforce_rate_limit(request, check_rate_limiter, "check_link")
@@ -3266,7 +3297,7 @@ async def api_inbox_guardian_scan(request: Request):
     await _audit(request, "inbox_guardian_scan", meta={"count": len(rows)})
     return JSONResponse({"count": len(rows), "results": rows})
 
-# --- Public Whitelist API (unchanged for now, admin handles this via form) ---
+# Public whitelist endpoints used by the panel and extension.
 @app.post("/add_trusted")
 async def add_trusted_api(request: Request):
     if not request.session.get("authenticated"):
@@ -3299,9 +3330,9 @@ async def remove_trusted_api(request: Request):
     success = await detector.remove_user_trusted(site)
     await _audit(request, "remove_trusted_api", detector._normalize_host(site), meta={"success": bool(success)})
     return JSONResponse({"ok": bool(success)})
-# --- Report API (unchanged) ---
+# Client-side report endpoint.
 @app.post("/report_phish")
-async def report_phish_api(request: Request): 
+async def report_phish_api(request: Request):
     try:
         data = await request.json()
     except Exception:
@@ -3319,26 +3350,26 @@ async def report_phish_api(request: Request):
         reasons = ["Reported by client"]
     detector.add_report(url, domain, probability, similar_to, reasons)
     return JSONResponse({"ok": True})
-# --- Index Page (unchanged) ---
+# Public landing page.
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     context = {"request": request, "extension_download_path": detector.get_extension_path()}
     return templates.TemplateResponse("index.html", context)
 
-# --- Admin ---
+# Admin pages and authentication
 
 @app.get("/login", response_class=HTMLResponse)
 async def login(request: Request):
-    
+
     # 1. اگر کاربر احراز هویت شده باشد...
     if request.session.get("authenticated"):
         # 2. و اگر ادمین باشد، او را به پنل ادمین هدایت کن.
         if request.session.get("is_admin"):
             return RedirectResponse(url=app.url_path_for("admin"), status_code=status.HTTP_302_FOUND)
-        
+
         # 3. اگر احراز هویت شده ولی ادمین نیست (کاربر عادی است)،
         # نباید ریدایرکت شود تا بتواند فرم لاگین را ببیند و شاید ادمین شود.
-        
+
     # 4. در غیر این صورت (ادمین نبودن یا عدم احراز هویت)، فرم لاگین را نمایش بده.
     context = {"request": request, "error": None}
     return templates.TemplateResponse("login.html", context)
@@ -3352,52 +3383,50 @@ async def login_post(request: Request, username: str = Form(...), password: str 
     except HTTPException:
         context = {"request": request, "error": "تعداد تلاش ورود زیاد است. کمی بعد دوباره تلاش کنید."}
         return templates.TemplateResponse("login.html", context, status_code=429)
-    
+
     if not mongo_store:
         return templates.TemplateResponse("login.html", {"request": request, "error": "Database not configured."}, status_code=500)
 
-    # 1. Check Admins
     admin_user_data = await mongo_store.get_admin_user(username)
     if admin_user_data:
-        # User is in the admin list. Check password.
-        if admin_user_data.get("password") == password: # Simple comparison for now
+        stored_password = admin_user_data.get("password", "")
+        if _verify_password(stored_password, password):
+            if _password_needs_upgrade(stored_password):
+                await mongo_store.update_admin_password(username, password)
             request.session["authenticated"] = True
             request.session["is_admin"] = True
-            request.session["username"] = username # Store username
-            request.session["display_name"] = admin_user_data.get("display_name", username) # Store display name
+            request.session["username"] = username
+            request.session["display_name"] = admin_user_data.get("display_name", username)
             request.session["rank"] = "admin"
             print(f"Admin login successful: {username}")
             await _audit(request, "login_success_admin", username)
             return RedirectResponse(url=app.url_path_for("admin"), status_code=status.HTTP_302_FOUND)
         else:
-            # Admin user found, but password was wrong. FAIL immediately.
-            # Do NOT proceed to check the normal user list.
             print(f"Admin login failed (wrong password): {username}")
             await _audit(request, "login_failed_admin_password", username)
             context = {"request": request, "error": "نام کاربری یا رمز عبور اشتباه است."}
             return templates.TemplateResponse("login.html", context, status_code=401)
 
-    # 2. Check Normal Users
-    # Only run this check if the user was NOT found in the admin list
     normal_user_data = await mongo_store.get_normal_user(username)
-    if normal_user_data and normal_user_data.get("password") == password: # Simple comparison for now
+    if normal_user_data and _verify_password(normal_user_data.get("password", ""), password):
+        if _password_needs_upgrade(normal_user_data.get("password", "")):
+            await mongo_store.update_normal_user_password(username, password)
         request.session["authenticated"] = True
         request.session["is_admin"] = False
-        request.session["username"] = username # Store username
-        request.session["display_name"] = normal_user_data.get("display_name", username) # Store display name
+        request.session["username"] = username
+        request.session["display_name"] = normal_user_data.get("display_name", username)
         request.session["rank"] = _normalize_rank(normal_user_data.get("rank"))
         request.session["team"] = _normalize_team(normal_user_data.get("team"))
         await _audit(request, "login_success_user", username)
         return RedirectResponse(url=app.url_path_for("user_panel"), status_code=status.HTTP_302_FOUND)
 
-    # 3. Failed (User not in admin list AND (not in normal list OR wrong pass for normal list))
     print(f"Login failed for user: {username}")
     await _audit(request, "login_failed", username)
     context = {"request": request, "error": "نام کاربری یا رمز عبور اشتباه است."}
     return templates.TemplateResponse("login.html", context, status_code=401)
 
 
-# --- NEW --- API Login for Extension
+# API login used by the browser extension.
 @app.post("/api/extension_login")
 async def api_extension_login(request: Request):
     global mongo_store
@@ -3412,9 +3441,10 @@ async def api_extension_login(request: Request):
     if not mongo_store:
         return JSONResponse({"success": False, "error": "Database not configured"}, status_code=500)
 
-    # Check normal users first
     user_data = await mongo_store.get_normal_user(username)
-    if user_data and user_data.get("password") == password:
+    if user_data and _verify_password(user_data.get("password", ""), password):
+        if _password_needs_upgrade(user_data.get("password", "")):
+            await mongo_store.update_normal_user_password(username, password)
         rank = _normalize_rank(user_data.get("rank"))
         team = _normalize_team(user_data.get("team"))
         caps = _resolve_rank_caps(rank, is_admin=False)
@@ -3433,9 +3463,10 @@ async def api_extension_login(request: Request):
             "capabilities": caps,
         })
 
-    # Optional: Allow admins to log in to extension as well
     admin_data = await mongo_store.get_admin_user(username)
-    if admin_data and admin_data.get("password") == password:
+    if admin_data and _verify_password(admin_data.get("password", ""), password):
+        if _password_needs_upgrade(admin_data.get("password", "")):
+            await mongo_store.update_admin_password(username, password)
         await mongo_store.add_audit_log(
             actor=f"extension:{username}",
             action="extension_login_success_admin",
@@ -3464,11 +3495,11 @@ async def api_extension_login(request: Request):
 async def logout(request: Request):
     username = request.session.get("username", "Unknown")
     await _audit(request, "logout", username)
-    request.session.clear() # Clear all session data
+    request.session.clear()
     print(f"User logout: {username}")
     return RedirectResponse(url=app.url_path_for("index"), status_code=status.HTTP_302_FOUND)
 
-# --- MODIFIED --- Admin page context includes more data
+# Admin page context.
 @app.get("/admin", response_class=HTMLResponse)
 async def admin(request: Request, admin_username: str = Depends(require_admin)):
     list_data = detector.get_list_data()
@@ -3486,16 +3517,16 @@ async def admin(request: Request, admin_username: str = Depends(require_admin)):
         "request": request,
         "trusted_count": list_data["global_count"],
         "user_trusted": list_data["user_trusted"],
-        "user_blacklist": list_data["user_blacklist"], # --- NEW ---
+        "user_blacklist": list_data["user_blacklist"],
         "temp_user_trusted": list_data.get("temp_user_trusted", []),
         "recent": reports,
         "metrics": metrics,
         "server_sensitivity": detector.server_sensitivity,
         "current_extension_file": detector.extension_filename,
         "server_health": detector.get_health_status(),
-        "admin_display_name": request.session.get("display_name", admin_username), # --- NEW --- Welcome message name
-        "all_admin_users": all_admin_users, # --- NEW --- Pass users for management
-        "all_normal_users": all_normal_users, # --- NEW --- Pass normal users
+        "admin_display_name": request.session.get("display_name", admin_username),
+        "all_admin_users": all_admin_users,
+        "all_normal_users": all_normal_users,
         "rank_caps_matrix": _get_rank_caps_matrix(),
         "rank_caps_overrides": RANK_CAPS_OVERRIDES,
         "teams": TEAMS,
@@ -3503,7 +3534,7 @@ async def admin(request: Request, admin_username: str = Depends(require_admin)):
     }
     return templates.TemplateResponse("admin.html", context)
 
-# --- NEW --- User Panel Endpoint
+# User panel page.
 @app.get("/userpanel", response_class=HTMLResponse)
 async def user_panel(request: Request, session: dict = Depends(require_authenticated)):
     list_data = detector.get_list_data()
@@ -3522,27 +3553,26 @@ async def user_panel(request: Request, session: dict = Depends(require_authentic
         "metrics": metrics,
         "server_sensitivity": detector.server_sensitivity,
         "server_health": detector.get_health_status(),
-        "admin_display_name": session.get("display_name", session.get("username")), # Use display name
+        "admin_display_name": session.get("display_name", session.get("username")),
         "caps": caps,
         "user_rank": rank,
         "user_team": _normalize_team(session.get("team")),
         "team_policy": TEAM_SENSITIVITY_OFFSET,
-        # Note: No system-level data like users or extension files is passed
+        # Keep system-level admin data out of the normal user panel.
     }
-    # Render a NEW template 'userpanel.html'
+    # Render the separate user panel template.
     return templates.TemplateResponse("userpanel.html", context)
 
 
-# --- Admin POST Endpoints (Some are new) ---
+# Admin and panel POST endpoints.
 
 @app.post("/admin/upload_extension", dependencies=[Depends(require_admin)])
 async def admin_upload_extension(request: Request, extension_file: UploadFile = File(...)):
-    if not extension_file.filename or not extension_file.filename.endswith(('.zip', '.crx')): # Basic validation
+    if not extension_file.filename or not extension_file.filename.endswith(('.zip', '.crx')):
         print("Upload failed: Invalid file type or no filename.")
-        # Optionally add a message to the session to show on redirect
         return RedirectResponse(url=app.url_path_for("admin"), status_code=status.HTTP_302_FOUND)
 
-    safe_filename = f"{int(time.time())}_{os.path.basename(extension_file.filename)}" # Sanitize filename
+    safe_filename = f"{int(time.time())}_{os.path.basename(extension_file.filename)}"
     file_path = os.path.join(detector.EXTENSION_UPLOAD_DIR, safe_filename)
     try:
         contents = await extension_file.read()
@@ -3557,9 +3587,7 @@ async def admin_upload_extension(request: Request, extension_file: UploadFile = 
     return RedirectResponse(url=app.url_path_for("admin"), status_code=status.HTTP_302_FOUND)
 
 
-# --- These actions might be used by the user panel too.
-# --- Let's make them require 'require_authenticated' instead of 'require_admin'
-# --- This allows normal users to manage their OWN lists.
+# These actions are shared by admin and user panels; rank capabilities decide what each user can do.
 
 @app.post("/admin/add_trusted", dependencies=[Depends(require_authenticated)])
 async def admin_add_trusted_form(request: Request, site: str = Form(...)):
@@ -3567,7 +3595,7 @@ async def admin_add_trusted_form(request: Request, site: str = Form(...)):
     success = await detector.add_user_trusted(site)
     await _audit(request, "add_trusted", detector._normalize_host(site), meta={"success": bool(success)})
     print(f"User {request.session.get('username')} added trusted: {site} (Success: {success})")
-    # Redirect back to REFERER (admin or userpanel)
+    # Send the user back to the panel they came from.
     redirect_url = request.headers.get("referer", app.url_path_for("admin"))
     return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
 
@@ -3580,7 +3608,7 @@ async def admin_remove_trusted_form(request: Request, site: str = Form(...)):
     redirect_url = request.headers.get("referer", app.url_path_for("admin"))
     return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
 
-# --- NEW --- Blacklist endpoints (also for all authenticated users)
+# Blacklist endpoints are available only to users whose rank allows blacklist management.
 @app.post("/admin/add_blacklist", dependencies=[Depends(require_authenticated)])
 async def admin_add_blacklist_form(request: Request, site: str = Form(...)):
     _require_panel_cap(request.session, "blacklist_manage")
@@ -3610,7 +3638,7 @@ async def admin_remove_blacklist_form(request: Request, site: str = Form(...)):
     redirect_url = request.headers.get("referer", app.url_path_for("admin"))
     return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
 
-# --- Sensitivity and Analyze are ADMIN-ONLY ---
+# Sensitivity and manual analysis are admin-only.
 
 @app.post("/admin/set_sensitivity", dependencies=[Depends(require_admin)])
 async def admin_set_sensitivity(request: Request, sensitivity: int = Form(...)):
@@ -3618,21 +3646,21 @@ async def admin_set_sensitivity(request: Request, sensitivity: int = Form(...)):
     await _audit(request, "set_sensitivity", meta={"value": int(sensitivity)})
     return RedirectResponse(url=app.url_path_for("admin"), status_code=status.HTTP_302_FOUND)
 
-# --- NEW --- Manual Analyze endpoint (ADMIN ONLY)
+# Manual analysis endpoint for admins.
 @app.post("/admin/analyze_url", dependencies=[Depends(require_admin)])
 async def admin_analyze_url(request: Request):
     try: data = await request.json(); url = data.get("url")
     except Exception: return JSONResponse({"error": "Invalid JSON"}, status_code=400)
     if not url: return JSONResponse({"error": "URL not provided"}, status_code=400)
     try:
-        # We don't need user sensitivity here, use server default
+        # Admin analysis uses the server-wide sensitivity policy.
         result = await detector.check_link(url)
         await _audit(request, "admin_analyze_url", detector._normalize_host(url), meta={"probability": result.get("probability", 0)})
         return JSONResponse(result)
     except HTTPException as he: return JSONResponse(he.detail, status_code=he.status_code)
     except Exception as e: return JSONResponse({"is_phishing": False, "error": f"Analysis error: {e}"}, status_code=500)
 
-# --- NEW --- Backup endpoints (ADMIN ONLY)
+# Backup endpoints for admins.
 @app.get("/admin/backup_whitelist", dependencies=[Depends(require_admin)])
 async def admin_backup_whitelist():
     if not mongo_store:
@@ -3642,11 +3670,10 @@ async def admin_backup_whitelist():
 
 @app.get("/admin/backup_logs", dependencies=[Depends(require_admin)])
 async def admin_backup_logs():
-    reports = await asyncio.to_thread(detector.get_reports, limit=10000) # Get all reports for backup
-    # Return as JSON directly
+    reports = await asyncio.to_thread(detector.get_reports, limit=10000)
     return JSONResponse(content=reports, headers={"Content-Disposition": "attachment; filename=phishguard_logs_backup.json"})
 
-# --- NEW --- Purge endpoint (ADMIN ONLY)
+# Purge reports endpoint for admins.
 @app.post("/admin/purge_logs", dependencies=[Depends(require_admin)])
 async def admin_purge_logs():
     try:
@@ -3655,14 +3682,14 @@ async def admin_purge_logs():
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
-# --- NEW --- User Management Endpoints (ADMIN ONLY)
+# Admin user management endpoints.
 @app.post("/admin/add_user", dependencies=[Depends(require_admin)])
 async def admin_add_user(request: Request,
                          new_username: str = Form(...),
                          new_password: str = Form(...),
                          display_name: str = Form(...)):
     if not new_username or not new_password or not display_name:
-        # Add error message to session maybe
+        # Missing fields are ignored and the admin stays on the user-management tab.
         return RedirectResponse(url=app.url_path_for("admin"), status_code=status.HTTP_302_FOUND)
 
     if not mongo_store:
@@ -3674,20 +3701,20 @@ async def admin_add_user(request: Request,
     else:
         print(f"Admin user added: {new_username}")
     await _audit(request, "add_admin_user", new_username, meta={"success": bool(added)})
-    return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND) # Redirect back to system tab
+    return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
 @app.post("/admin/remove_user", dependencies=[Depends(require_admin)])
 async def admin_remove_user(request: Request, username_to_remove: str = Form(...)):
     current_user = request.session.get("username")
 
     if username_to_remove == current_user:
-        # Cannot remove self
+        # Never let an admin remove their own active account.
         print("Remove admin user failed: Cannot remove self.")
         return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
     if not mongo_store:
         return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
     if await mongo_store.admin_count() <= 1:
-        # Cannot remove the last admin
+        # Keep at least one admin account available.
         print("Remove admin user failed: Cannot remove the last admin.")
         return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
@@ -3701,7 +3728,7 @@ async def admin_remove_user(request: Request, username_to_remove: str = Form(...
     return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
 
-# --- NEW --- Normal User Management Endpoints (ADMIN ONLY)
+# Normal user management endpoints.
 @app.post("/admin/add_normal_user", dependencies=[Depends(require_admin)])
 async def admin_add_normal_user(request: Request,
                                 new_normal_username: str = Form(...),
@@ -3736,7 +3763,7 @@ async def admin_add_normal_user(request: Request,
 
 @app.post("/admin/remove_normal_user", dependencies=[Depends(require_admin)])
 async def admin_remove_normal_user(request: Request, username_to_remove_normal: str = Form(...)):
-    # No self-check needed as admin is not in this list
+    # Normal users are separate from admin accounts, so there is no self-removal edge case here.
     if not mongo_store:
         return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
@@ -3786,7 +3813,7 @@ async def admin_update_normal_user_team(
     return RedirectResponse(url=app.url_path_for("admin") + "?tab=system", status_code=status.HTTP_302_FOUND)
 
 
-# --- Shutdown (ADMIN ONLY) ---
+# Controlled shutdown endpoint for admins.
 @app.post("/admin/shutdown", dependencies=[Depends(require_admin)])
 async def admin_shutdown():
     print("--- 🛑 Server Shutdown Request Received (Admin) 🛑 ---")
@@ -3795,7 +3822,7 @@ async def admin_shutdown():
     return JSONResponse({"status": "Server shutting down!"})
 
 if __name__ == "__main__":
-    # Ensure necessary files exist
+    # Create the trusted-domain cache file on first boot.
     if not os.path.exists(TRUSTED_GLOBAL_CACHE):
         print(f"Creating empty file: {TRUSTED_GLOBAL_CACHE}")
         with open(TRUSTED_GLOBAL_CACHE, 'w') as fp:
