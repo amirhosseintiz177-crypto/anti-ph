@@ -3364,10 +3364,14 @@ async def report_phish_api(request: Request):
     detector.add_report(url, domain, probability, similar_to, reasons)
     return JSONResponse({"ok": True})
 # Public landing page.
+@app.head("/")
+async def index_head():
+    return HTMLResponse(content="")
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     context = {"request": request, "extension_download_path": detector.get_extension_path()}
-    return templates.TemplateResponse("index.html", context)
+    return templates.TemplateResponse(request, "index.html", context)
 
 # Admin pages and authentication
 
@@ -3385,7 +3389,7 @@ async def login(request: Request):
 
     # 4. در غیر این صورت (ادمین نبودن یا عدم احراز هویت)، فرم لاگین را نمایش بده.
     context = {"request": request, "error": None}
-    return templates.TemplateResponse("login.html", context)
+    return templates.TemplateResponse(request, "login.html", context)
 
 
 @app.post("/login")
@@ -3395,10 +3399,10 @@ async def login_post(request: Request, username: str = Form(...), password: str 
         _enforce_rate_limit(request, login_rate_limiter, "login_form")
     except HTTPException:
         context = {"request": request, "error": "تعداد تلاش ورود زیاد است. کمی بعد دوباره تلاش کنید."}
-        return templates.TemplateResponse("login.html", context, status_code=429)
+        return templates.TemplateResponse(request, "login.html", context, status_code=429)
 
     if not mongo_store:
-        return templates.TemplateResponse("login.html", {"request": request, "error": "Database not configured."}, status_code=500)
+        return templates.TemplateResponse(request, "login.html", {"request": request, "error": "Database not configured."}, status_code=500)
 
     admin_user_data = await mongo_store.get_admin_user(username)
     if admin_user_data:
@@ -3418,7 +3422,7 @@ async def login_post(request: Request, username: str = Form(...), password: str 
             print(f"Admin login failed (wrong password): {username}")
             await _audit(request, "login_failed_admin_password", username)
             context = {"request": request, "error": "نام کاربری یا رمز عبور اشتباه است."}
-            return templates.TemplateResponse("login.html", context, status_code=401)
+            return templates.TemplateResponse(request, "login.html", context, status_code=401)
 
     normal_user_data = await mongo_store.get_normal_user(username)
     if normal_user_data and _verify_password(normal_user_data.get("password", ""), password):
@@ -3436,7 +3440,7 @@ async def login_post(request: Request, username: str = Form(...), password: str 
     print(f"Login failed for user: {username}")
     await _audit(request, "login_failed", username)
     context = {"request": request, "error": "نام کاربری یا رمز عبور اشتباه است."}
-    return templates.TemplateResponse("login.html", context, status_code=401)
+    return templates.TemplateResponse(request, "login.html", context, status_code=401)
 
 
 # API login used by the browser extension.
@@ -3547,7 +3551,7 @@ async def admin(request: Request, admin_username: str = Depends(require_admin)):
         "team_labels": TEAM_LABELS,
         "team_policy": TEAM_SENSITIVITY_OFFSET,
     }
-    return templates.TemplateResponse("admin.html", context)
+    return templates.TemplateResponse(request, "admin.html", context)
 
 # User panel page.
 @app.get("/userpanel", response_class=HTMLResponse)
@@ -3578,7 +3582,7 @@ async def user_panel(request: Request, session: dict = Depends(require_authentic
         # Keep system-level admin data out of the normal user panel.
     }
     # Render the separate user panel template.
-    return templates.TemplateResponse("userpanel.html", context)
+    return templates.TemplateResponse(request, "userpanel.html", context)
 
 
 # Admin and panel POST endpoints.
