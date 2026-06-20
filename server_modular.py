@@ -118,6 +118,19 @@ RANKS = ["basic", "plus", "pro"]
 DEFAULT_RANK = "basic"
 TEAMS = ["general", "finance", "hr", "it"]
 DEFAULT_TEAM = "general"
+RANK_LABELS = {
+    "basic": "پایه",
+    "plus": "پلاس",
+    "pro": "حرفه‌ای",
+    "admin": "مدیر",
+}
+TEAM_LABELS = {
+    "general": "عمومی",
+    "finance": "مالی",
+    "hr": "منابع انسانی",
+    "it": "فناوری اطلاعات",
+    "admin": "مدیریت",
+}
 TEAM_SENSITIVITY_OFFSET = {
     "general": 0,
     "finance": 6,
@@ -3530,6 +3543,8 @@ async def admin(request: Request, admin_username: str = Depends(require_admin)):
         "rank_caps_matrix": _get_rank_caps_matrix(),
         "rank_caps_overrides": RANK_CAPS_OVERRIDES,
         "teams": TEAMS,
+        "rank_labels": RANK_LABELS,
+        "team_labels": TEAM_LABELS,
         "team_policy": TEAM_SENSITIVITY_OFFSET,
     }
     return templates.TemplateResponse("admin.html", context)
@@ -3557,6 +3572,8 @@ async def user_panel(request: Request, session: dict = Depends(require_authentic
         "caps": caps,
         "user_rank": rank,
         "user_team": _normalize_team(session.get("team")),
+        "rank_labels": RANK_LABELS,
+        "team_labels": TEAM_LABELS,
         "team_policy": TEAM_SENSITIVITY_OFFSET,
         # Keep system-level admin data out of the normal user panel.
     }
