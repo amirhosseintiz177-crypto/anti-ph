@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>پنل کاربری PhishGuard</title>
+  <title>پنل کاربری فیش‌گارد</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
   <style>
     :root {
@@ -148,14 +148,14 @@
 </head>
 <body>
   <div class="topbar">
-    <div class="brand"><i class="fas fa-user-shield"></i> پنل کاربری PhishGuard</div>
+    <div class="brand"><i class="fas fa-user-shield"></i> پنل کاربری فیش‌گارد</div>
     <div class="stats">
       <div class="chip">کاربر: <b>{{ admin_display_name }}</b></div>
-      <div class="chip">رنک: <b>{{ user_rank }}</b></div>
-      <div class="chip">Team: <b>{{ user_team }}</b></div>
-      <div class="chip">Whitelist: <b>{{ user_trusted|length }}</b></div>
-      <div class="chip">Blacklist: <b>{{ user_blacklist|length }}</b></div>
-      <div class="chip">Temp Trust: <b>{{ temp_user_trusted|length }}</b></div>
+      <div class="chip">سطح دسترسی: <b>{{ rank_labels.get(user_rank, user_rank) }}</b></div>
+      <div class="chip">تیم: <b>{{ team_labels.get(user_team, user_team) }}</b></div>
+      <div class="chip">فهرست امن: <b>{{ user_trusted|length }}</b></div>
+      <div class="chip">فهرست مسدود: <b>{{ user_blacklist|length }}</b></div>
+      <div class="chip">اعتماد موقت: <b>{{ temp_user_trusted|length }}</b></div>
       <a class="chip" href="/logout">خروج</a>
     </div>
   </div>
@@ -169,7 +169,7 @@
       {% if caps.panel.domains_tab %}
       <button class="tab-btn" data-tab="domains">دامنه‌ها</button>
       {% endif %}
-      <button class="tab-btn" data-tab="intel">Intel</button>
+      <button class="tab-btn" data-tab="intel">هوش امنیتی</button>
       <button class="tab-btn" data-tab="logs">لاگ‌ها</button>
     </div>
 
@@ -186,7 +186,7 @@
           <div class="muted">از اسکن متن/فایل</div>
         </div>
         <div class="card">
-          <h3>Temp Trust در 24 ساعت آینده</h3>
+          <h3>اعتمادهای موقت در 24 ساعت آینده</h3>
           <div class="kpi warn" id="sumTemp24">-</div>
           <div class="muted">در حال انقضا</div>
         </div>
@@ -196,28 +196,28 @@
         <div class="card">
           <h3>سلامت سرویس</h3>
           <table>
-            <tr><th>ML</th><td>{{ server_health.ml_model }}</td></tr>
-            <tr><th>Global Cache</th><td>{{ server_health.global_cache }}</td></tr>
-            <tr><th>Threat Feed</th><td>{{ server_health.threat_feed_status }}</td></tr>
-            <tr><th>GSB</th><td>{{ "فعال" if server_health.gsb_enabled else "غیرفعال" }}</td></tr>
-            <tr><th>Uptime</th><td>{{ server_health.uptime_seconds }} ثانیه</td></tr>
+            <tr><th>مدل هوشمند</th><td>{{ server_health.ml_model }}</td></tr>
+            <tr><th>کش جهانی</th><td>{{ server_health.global_cache }}</td></tr>
+            <tr><th>فید تهدید</th><td>{{ server_health.threat_feed_status }}</td></tr>
+            <tr><th>بررسی امن گوگل</th><td>{{ "فعال" if server_health.gsb_enabled else "غیرفعال" }}</td></tr>
+            <tr><th>زمان کارکرد</th><td>{{ server_health.uptime_seconds }} ثانیه</td></tr>
           </table>
         </div>
         <div class="card">
           <h3>خلاصه کاربر</h3>
           <table>
-            <tr><th>Trusted جهانی</th><td>{{ "{:,}".format(trusted_count | int) }}</td></tr>
-            <tr><th>Team</th><td>{{ user_team }}</td></tr>
-            <tr><th>Policy Offset</th><td>{{ team_policy.get(user_team, 0) }}</td></tr>
-            <tr><th>قابلیت Scan File</th><td>{{ "فعال" if caps.panel.scan_file else "غیرفعال" }}</td></tr>
-            <tr><th>قابلیت Export</th><td>{{ "فعال" if caps.panel.export_history else "غیرفعال" }}</td></tr>
-            <tr><th>قابلیت Blacklist Manage</th><td>{{ "فعال" if caps.panel.blacklist_manage else "غیرفعال" }}</td></tr>
+            <tr><th>دامنه‌های امن جهانی</th><td>{{ "{:,}".format(trusted_count | int) }}</td></tr>
+            <tr><th>تیم</th><td>{{ team_labels.get(user_team, user_team) }}</td></tr>
+            <tr><th>تغییر سیاست حساسیت</th><td>{{ team_policy.get(user_team, 0) }}</td></tr>
+            <tr><th>قابلیت اسکن فایل</th><td>{{ "فعال" if caps.panel.scan_file else "غیرفعال" }}</td></tr>
+            <tr><th>قابلیت خروجی گرفتن</th><td>{{ "فعال" if caps.panel.export_history else "غیرفعال" }}</td></tr>
+            <tr><th>قابلیت مدیریت فهرست مسدود</th><td>{{ "فعال" if caps.panel.blacklist_manage else "غیرفعال" }}</td></tr>
           </table>
         </div>
       </div>
 
       <div class="card">
-        <h3>Temp Trust</h3>
+        <h3>اعتماد موقت</h3>
         {% if caps.panel.whitelist_manage %}
         <div class="row">
           <input type="text" id="tempSite" placeholder="domain.com">
@@ -226,7 +226,7 @@
           <button class="btn" id="tempAddBtn" type="button">افزودن</button>
         </div>
         {% else %}
-        <div class="muted">این قابلیت برای رنک شما فعال نیست.</div>
+        <div class="muted">این قابلیت برای سطح دسترسی شما فعال نیست.</div>
         {% endif %}
         <table id="tempTrustTable" style="margin-top: 8px;">
           <thead><tr><th>دامنه</th><th>انقضا</th><th>ایجادکننده</th><th>عملیات</th></tr></thead>
@@ -253,7 +253,7 @@
           <textarea id="scanText" placeholder="متن ایمیل یا پیام را وارد کنید..."></textarea>
           <div class="row">
             {% if caps.panel.redirect_chain %}
-            <label><input type="checkbox" id="scanRedirects"> بررسی ریدایرکت</label>
+            <label><input type="checkbox" id="scanRedirects"> بررسی تغییر مسیر</label>
             {% endif %}
             <button class="btn" id="scanTextBtn" type="button">اسکن متن</button>
           </div>
@@ -265,7 +265,7 @@
           <div class="drop-zone" id="dropZone">فایل را اینجا رها کنید</div>
           <div class="row"><button class="btn" id="scanFileBtn" type="button">اسکن فایل</button></div>
           {% else %}
-          <div class="muted">اسکن فایل برای رنک شما فعال نیست.</div>
+          <div class="muted">اسکن فایل برای سطح دسترسی شما فعال نیست.</div>
           {% endif %}
         </div>
       </div>
@@ -273,14 +273,14 @@
         <h3>نتایج اسکن</h3>
         <div id="scanSummary" class="muted">هنوز اسکن انجام نشده.</div>
         <table id="scanResultsTable" style="margin-top: 8px;">
-          <thead><tr><th>URL</th><th>وضعیت</th><th>درصد</th><th>خلاصه</th><th>بازخورد</th></tr></thead>
+          <thead><tr><th>نشانی</th><th>وضعیت</th><th>درصد</th><th>خلاصه</th><th>بازخورد</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
       <div class="card">
         <h3>تاریخچه اسکن</h3>
         <div class="row">
-          <button class="btn small" id="refreshHistoryBtn" type="button">بروزرسانی</button>
+          <button class="btn small" id="refreshHistoryBtn" type="button">به‌روزرسانی</button>
           {% if caps.panel.export_history %}
           <a class="btn small" href="/api/export_scan_history">خروجی CSV</a>
           {% endif %}
@@ -297,14 +297,14 @@
     <section id="domains" class="tab">
       <div class="grid-2">
         <div class="card">
-          <h3>Whitelist</h3>
+          <h3>فهرست امن</h3>
           {% if caps.panel.whitelist_manage %}
           <form method="POST" action="/admin/add_trusted" class="row">
             <input type="text" name="site" placeholder="example.com" required>
             <button class="btn ok" type="submit">افزودن</button>
           </form>
           {% else %}
-          <div class="muted">مدیریت whitelist برای رنک شما فعال نیست.</div>
+          <div class="muted">مدیریت فهرست امن برای سطح دسترسی شما فعال نیست.</div>
           {% endif %}
           <ul class="list">
             {% for site in user_trusted %}
@@ -321,14 +321,14 @@
           </ul>
         </div>
         <div class="card">
-          <h3>Blacklist</h3>
+          <h3>فهرست مسدود</h3>
           {% if caps.panel.blacklist_manage %}
           <form method="POST" action="/admin/add_blacklist" class="row">
             <input type="text" name="site" placeholder="bad-domain.com" required>
             <button class="btn danger" type="submit">افزودن</button>
           </form>
           {% else %}
-          <div class="muted">مدیریت blacklist برای رنک شما فعال نیست.</div>
+          <div class="muted">مدیریت فهرست مسدود برای سطح دسترسی شما فعال نیست.</div>
           {% endif %}
           <ul class="list">
             {% for site in user_blacklist %}
@@ -351,33 +351,33 @@
     <section id="intel" class="tab">
       <div class="grid-2">
         <div class="card">
-          <h3>Domain Intel</h3>
+          <h3>هوش دامنه</h3>
           <div class="row">
             <input type="text" id="intelDomain" placeholder="domain.com">
-            <button class="btn" id="intelCheckBtn" type="button">Analyze Domain</button>
+            <button class="btn" id="intelCheckBtn" type="button">تحلیل دامنه</button>
           </div>
           <div id="intelSummary" class="muted" style="margin-top: 8px;">-</div>
           <table id="intelTimelineTable" style="margin-top: 8px;">
-            <thead><tr><th>زمان</th><th>Risk</th><th>Status</th><th>Reason</th></tr></thead>
+            <thead><tr><th>زمان</th><th>ریسک</th><th>وضعیت</th><th>دلیل</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
         <div class="card">
-          <h3>Inbox Guardian</h3>
-          <textarea id="guardianUrls" placeholder="one url per line"></textarea>
+          <h3>نگهبان صندوق پیام</h3>
+          <textarea id="guardianUrls" placeholder="هر نشانی در یک خط"></textarea>
           <div class="row">
-            <button class="btn" id="guardianScanBtn" type="button">Scan URLs</button>
+            <button class="btn" id="guardianScanBtn" type="button">بررسی نشانی‌ها</button>
           </div>
           <table id="guardianTable" style="margin-top: 8px;">
-            <thead><tr><th>Domain</th><th>Risk</th><th>Severity</th><th>Action</th></tr></thead>
+            <thead><tr><th>دامنه</th><th>ریسک</th><th>شدت</th><th>اقدام پیشنهادی</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
       </div>
       <div class="card">
-        <h3>Security Training Links</h3>
+        <h3>لینک‌های آموزشی امنیتی</h3>
         <table id="honeyLinksTable">
-          <thead><tr><th>Token</th><th>Label</th><th>Link</th></tr></thead>
+          <thead><tr><th>توکن</th><th>برچسب</th><th>لینک</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -396,10 +396,10 @@
               <td>{{ r.probability }}%</td>
               <td class="row">
                 {% if caps.panel.quick_whitelist %}
-                <button class="btn small ok quick-action" data-a="add_trusted" data-d="{{ r.domain }}">Whitelist</button>
+                <button class="btn small ok quick-action" data-a="add_trusted" data-d="{{ r.domain }}">امن‌سازی</button>
                 {% endif %}
                 {% if caps.panel.quick_blacklist %}
-                <button class="btn small danger quick-action" data-a="add_blacklist" data-d="{{ r.domain }}">Blacklist</button>
+                <button class="btn small danger quick-action" data-a="add_blacklist" data-d="{{ r.domain }}">مسدودسازی</button>
                 {% endif %}
               </td>
             </tr>
@@ -518,7 +518,7 @@
       const body = document.querySelector('#intelTimelineTable tbody');
       if (!domain || !summary || !body) return;
 
-      summary.textContent = 'Loading...';
+      summary.textContent = 'در حال بارگذاری...';
       body.innerHTML = '';
       try {
         const [timelineResp, fpResp] = await Promise.all([
@@ -529,26 +529,45 @@
         const timelineData = await timelineResp.json();
         const fpData = await fpResp.json();
         if (!timelineResp.ok) {
-          summary.textContent = timelineData.error || 'domain timeline failed';
+          summary.textContent = timelineData.error || 'دریافت خط زمانی دامنه ناموفق بود';
           return;
         }
 
         const points = timelineData.points || [];
         summary.textContent =
-          `Points: ${points.length} | Trend: ${Number(timelineData.trend_delta || 0)} | Volatility: ${Number(timelineData.volatility || 0)}`
-          + (fpData && fpData.found ? ` | Drift: ${Number(fpData.state?.drift_count || 0)}` : ' | Fingerprint: new');
+          `نقاط: ${points.length} | روند: ${Number(timelineData.trend_delta || 0)} | نوسان: ${Number(timelineData.volatility || 0)}`
+          + (fpData && fpData.found ? ` | تغییر الگو: ${Number(fpData.state?.drift_count || 0)}` : ' | اثرانگشت: جدید');
 
         points.slice(-50).reverse().forEach((p) => {
           body.innerHTML += `<tr>
             <td>${esc(p.time || '-')}</td>
             <td>${Number(p.probability || 0)}%</td>
-            <td>${p.is_phishing ? '<span class="badge danger">PHISHING</span>' : '<span class="badge ok">SAFE</span>'}</td>
+            <td>${p.is_phishing ? '<span class="badge danger">فیشینگ</span>' : '<span class="badge ok">ایمن</span>'}</td>
             <td>${esc(p.reason || '-')}</td>
           </tr>`;
         });
       } catch (_e) {
-        summary.textContent = 'network error';
+        summary.textContent = 'خطای شبکه';
       }
+    }
+
+    function guardianSeverityLabel(value) {
+      const labels = {
+        critical: 'بحرانی',
+        high: 'زیاد',
+        medium: 'متوسط',
+        low: 'کم',
+      };
+      return labels[value] || value || '-';
+    }
+
+    function guardianActionLabel(value) {
+      const labels = {
+        block_and_report: 'مسدودسازی و گزارش',
+        review_before_click: 'بازبینی پیش از کلیک',
+        allow: 'مجاز',
+      };
+      return labels[value] || value || '-';
     }
 
     async function runInboxGuardian() {
@@ -570,8 +589,8 @@
           body.innerHTML += `<tr>
             <td class="mono">${esc(row.domain || '-')}</td>
             <td>${Number(row.probability || 0)}%</td>
-            <td>${esc(row.severity || '-')}</td>
-            <td>${esc(row.recommended_action || '-')}</td>
+            <td>${esc(guardianSeverityLabel(row.severity))}</td>
+            <td>${esc(guardianActionLabel(row.recommended_action))}</td>
           </tr>`;
         });
       } catch (_e) {}
@@ -596,9 +615,9 @@
     }
 
     function statusBadge(status) {
-      if (status === 'PHISHING') return '<span class="badge danger">PHISHING</span>';
-      if (status === 'SAFE') return '<span class="badge ok">SAFE</span>';
-      return '<span class="badge warn">ERROR</span>';
+      if (status === 'PHISHING') return '<span class="badge danger">فیشینگ</span>';
+      if (status === 'SAFE') return '<span class="badge ok">ایمن</span>';
+      return '<span class="badge warn">خطا</span>';
     }
 
     function shortReason(item) {

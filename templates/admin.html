@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>پنل مدیریت PhishGuard</title>
+  <title>پنل مدیریت فیش‌گارد</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
   <style>
     :root {
@@ -192,13 +192,13 @@
 </head>
 <body>
   <div class="topbar">
-    <div class="brand"><i class="fas fa-shield-halved"></i> PhishGuard Admin</div>
+    <div class="brand"><i class="fas fa-shield-halved"></i> پنل مدیریت فیش‌گارد</div>
     <div class="stats">
       <div class="chip">مدیر: <b>{{ admin_display_name }}</b></div>
-      <div class="chip">دامنه امن جهانی: <b>{{ "{:,}".format(trusted_count | int) }}</b></div>
-      <div class="chip">Whitelist: <b>{{ user_trusted|length }}</b></div>
-      <div class="chip">Blacklist: <b>{{ user_blacklist|length }}</b></div>
-      <div class="chip">Temp Trust: <b>{{ temp_user_trusted|length }}</b></div>
+      <div class="chip">دامنه‌های امن جهانی: <b>{{ "{:,}".format(trusted_count | int) }}</b></div>
+      <div class="chip">فهرست امن: <b>{{ user_trusted|length }}</b></div>
+      <div class="chip">فهرست مسدود: <b>{{ user_blacklist|length }}</b></div>
+      <div class="chip">اعتماد موقت: <b>{{ temp_user_trusted|length }}</b></div>
     </div>
   </div>
 
@@ -207,8 +207,8 @@
       <button class="tab-btn active" data-tab="dash">داشبورد</button>
       <button class="tab-btn" data-tab="domains">دامنه‌ها</button>
       <button class="tab-btn" data-tab="feedback">بازخوردها</button>
-      <button class="tab-btn" data-tab="users">کاربران و رنک</button>
-      <button class="tab-btn" data-tab="intel">Threat Intel</button>
+      <button class="tab-btn" data-tab="users">کاربران و سطح دسترسی</button>
+      <button class="tab-btn" data-tab="intel">هوش تهدید</button>
       <button class="tab-btn" data-tab="system">سیستم</button>
     </div>
 
@@ -222,7 +222,7 @@
         <div class="card">
           <h3>لینک اسکن‌شده</h3>
           <div class="kpi ok" id="kpi-scan">{{ metrics.scan_total }}</div>
-          <div class="muted">از فایل/متن کاربران</div>
+          <div class="muted">از فایل یا متن کاربران</div>
         </div>
         <div class="card">
           <h3>نرخ برخورد</h3>
@@ -235,13 +235,13 @@
         <div class="card">
           <h3>سلامت سرویس</h3>
           <table>
-            <tr><th>ML</th><td>{{ server_health.ml_model }}</td></tr>
-            <tr><th>Global Cache</th><td>{{ server_health.global_cache }}</td></tr>
-            <tr><th>Threat Feed</th><td>{{ server_health.threat_feed_status }}</td></tr>
-            <tr><th>GSB</th><td>{{ "فعال" if server_health.gsb_enabled else "غیرفعال" }}</td></tr>
-            <tr><th>آخرین آپدیت Trusted</th><td>{{ server_health.trusted_last_refresh or "-" }}</td></tr>
-            <tr><th>آخرین آپدیت Threat</th><td>{{ server_health.threat_last_refresh or "-" }}</td></tr>
-            <tr><th>Uptime</th><td>{{ server_health.uptime_seconds }} ثانیه</td></tr>
+            <tr><th>مدل هوشمند</th><td>{{ server_health.ml_model }}</td></tr>
+            <tr><th>کش جهانی</th><td>{{ server_health.global_cache }}</td></tr>
+            <tr><th>فید تهدید</th><td>{{ server_health.threat_feed_status }}</td></tr>
+            <tr><th>بررسی امن گوگل</th><td>{{ "فعال" if server_health.gsb_enabled else "غیرفعال" }}</td></tr>
+            <tr><th>آخرین به‌روزرسانی فهرست امن</th><td>{{ server_health.trusted_last_refresh or "-" }}</td></tr>
+            <tr><th>آخرین به‌روزرسانی فید تهدید</th><td>{{ server_health.threat_last_refresh or "-" }}</td></tr>
+            <tr><th>زمان کارکرد</th><td>{{ server_health.uptime_seconds }} ثانیه</td></tr>
           </table>
         </div>
         <div class="card">
@@ -259,7 +259,7 @@
 
       <div class="card">
         <h3>فید زنده گزارش‌ها</h3>
-        <div class="muted" style="margin-bottom: 8px;">هر 15 ثانیه بروزرسانی می‌شود.</div>
+        <div class="muted" style="margin-bottom: 8px;">هر 15 ثانیه به‌روزرسانی می‌شود.</div>
         <table id="liveReportsTable">
           <thead><tr><th>زمان</th><th>دامنه</th><th>احتمال</th><th>دلیل</th></tr></thead>
           <tbody>
@@ -279,7 +279,7 @@
     <section id="domains" class="tab">
       <div class="grid-2">
         <div class="card">
-          <h3>Whitelist</h3>
+          <h3>فهرست امن</h3>
           <form method="POST" action="/admin/add_trusted" class="row">
             <input type="text" name="site" placeholder="example.com" required>
             <button class="btn ok" type="submit">افزودن</button>
@@ -298,14 +298,14 @@
         </div>
 
         <div class="card">
-          <h3>Blacklist + Incident Block</h3>
+          <h3>فهرست مسدود و مهار رخداد</h3>
           <form method="POST" action="/admin/add_blacklist" class="row">
             <input type="text" name="site" placeholder="bad-domain.com" required>
-            <button class="btn danger" type="submit">بلاک دامنه</button>
+            <button class="btn danger" type="submit">مسدود کردن دامنه</button>
           </form>
           <form method="POST" action="/admin/add_blacklist_suffix" class="row" style="margin-top: 8px;">
             <input type="text" name="suffix" placeholder="xyz یا *.xyz" required>
-            <button class="btn warn" type="submit">بلاک گروهی</button>
+            <button class="btn warn" type="submit">مسدودسازی گروهی</button>
           </form>
           <ul class="list">
             {% for site in user_blacklist %}
@@ -322,7 +322,7 @@
       </div>
 
       <div class="card">
-        <h3>Temporary Trust</h3>
+        <h3>اعتماد موقت</h3>
         <div class="row">
           <input type="text" id="tempSite" placeholder="domain.com">
           <input type="number" id="tempMinutes" placeholder="دقیقه" value="1440" min="5" max="43200">
@@ -340,7 +340,7 @@
       <div class="card">
         <h3>صف بازخورد کاربران</h3>
         <div class="row" style="margin-bottom: 8px;">
-          <button class="btn primary small" id="refreshFeedbackBtn" type="button">بروزرسانی</button>
+          <button class="btn primary small" id="refreshFeedbackBtn" type="button">به‌روزرسانی</button>
         </div>
         <table id="feedbackTable">
           <thead><tr><th>زمان</th><th>دامنه</th><th>برچسب کاربر</th><th>پیش‌بینی</th><th>عملیات</th></tr></thead>
@@ -352,12 +352,12 @@
     <section id="users" class="tab">
       <div class="grid-2">
         <div class="card">
-          <h3>افزودن ادمین</h3>
+          <h3>افزودن مدیر</h3>
           <form method="POST" action="/admin/add_user">
-            <div class="row"><input type="text" name="new_username" placeholder="username" required></div>
-            <div class="row"><input type="password" name="new_password" placeholder="password" required></div>
-            <div class="row"><input type="text" name="display_name" placeholder="display name" required></div>
-            <button class="btn ok" type="submit">ثبت ادمین</button>
+            <div class="row"><input type="text" name="new_username" placeholder="نام کاربری" required></div>
+            <div class="row"><input type="password" name="new_password" placeholder="رمز عبور" required></div>
+            <div class="row"><input type="text" name="display_name" placeholder="نام نمایشی" required></div>
+            <button class="btn ok" type="submit">ثبت مدیر</button>
           </form>
           <ul class="list" style="margin-top:8px;">
             {% for username, user_data in all_admin_users.items() %}
@@ -377,20 +377,20 @@
         <div class="card">
           <h3>افزودن کاربر عادی</h3>
           <form method="POST" action="/admin/add_normal_user">
-            <div class="row"><input type="text" name="new_normal_username" placeholder="username" required></div>
-            <div class="row"><input type="password" name="new_normal_password" placeholder="password" required></div>
-            <div class="row"><input type="text" name="normal_display_name" placeholder="display name" required></div>
+            <div class="row"><input type="text" name="new_normal_username" placeholder="نام کاربری" required></div>
+            <div class="row"><input type="password" name="new_normal_password" placeholder="رمز عبور" required></div>
+            <div class="row"><input type="text" name="normal_display_name" placeholder="نام نمایشی" required></div>
             <div class="row">
               <select name="normal_rank">
-                <option value="basic">basic</option>
-                <option value="plus">plus</option>
-                <option value="pro">pro</option>
+                <option value="basic">پایه</option>
+                <option value="plus">پلاس</option>
+                <option value="pro">حرفه‌ای</option>
               </select>
             </div>
             <div class="row">
               <select name="normal_team">
                 {% for t in teams %}
-                <option value="{{ t }}">{{ t }}</option>
+                <option value="{{ t }}">{{ team_labels.get(t, t) }}</option>
                 {% endfor %}
               </select>
             </div>
@@ -399,25 +399,25 @@
           <ul class="list" style="margin-top:8px;">
             {% for username, user_data in all_normal_users.items() %}
             <li>
-              <span>{{ user_data.display_name }} ({{ username }}) - {{ user_data.get("rank", "basic") }} / {{ user_data.get("team", "default") }}</span>
+              <span>{{ user_data.display_name }} ({{ username }}) - {{ rank_labels.get(user_data.get("rank", "basic"), user_data.get("rank", "basic")) }} / {{ team_labels.get(user_data.get("team", "general"), user_data.get("team", "general")) }}</span>
               <div class="row">
                 <form method="POST" action="/admin/update_normal_user_rank" class="row">
                   <input type="hidden" name="username_to_update" value="{{ username }}">
                   <select name="normal_rank">
-                    <option value="basic" {% if user_data.get("rank", "basic") == "basic" %}selected{% endif %}>basic</option>
-                    <option value="plus" {% if user_data.get("rank", "basic") == "plus" %}selected{% endif %}>plus</option>
-                    <option value="pro" {% if user_data.get("rank", "basic") == "pro" %}selected{% endif %}>pro</option>
+                    <option value="basic" {% if user_data.get("rank", "basic") == "basic" %}selected{% endif %}>پایه</option>
+                    <option value="plus" {% if user_data.get("rank", "basic") == "plus" %}selected{% endif %}>پلاس</option>
+                    <option value="pro" {% if user_data.get("rank", "basic") == "pro" %}selected{% endif %}>حرفه‌ای</option>
                   </select>
-                  <button class="btn small primary" type="submit">آپدیت</button>
+                  <button class="btn small primary" type="submit">ذخیره</button>
                 </form>
                 <form method="POST" action="/admin/update_normal_user_team" class="row">
                   <input type="hidden" name="username_to_update" value="{{ username }}">
                   <select name="normal_team">
                     {% for t in teams %}
-                    <option value="{{ t }}" {% if user_data.get("team", "default") == t %}selected{% endif %}>{{ t }}</option>
+                    <option value="{{ t }}" {% if user_data.get("team", "general") == t %}selected{% endif %}>{{ team_labels.get(t, t) }}</option>
                     {% endfor %}
                   </select>
-                  <button class="btn small warn" type="submit">Team</button>
+                  <button class="btn small warn" type="submit">تیم</button>
                 </form>
                 <form method="POST" action="/admin/remove_normal_user">
                   <input type="hidden" name="username_to_remove_normal" value="{{ username }}">
@@ -431,16 +431,16 @@
       </div>
 
       <div class="card">
-        <h3>مدیریت قابلیت‌های رنک</h3>
+        <h3>مدیریت قابلیت‌های سطح دسترسی</h3>
         <div class="row" style="margin-bottom: 10px;">
           <select id="capRankSelect">
-            <option value="basic">basic</option>
-            <option value="plus">plus</option>
-            <option value="pro">pro</option>
-            <option value="admin">admin</option>
+            <option value="basic">پایه</option>
+            <option value="plus">پلاس</option>
+            <option value="pro">حرفه‌ای</option>
+            <option value="admin">مدیر</option>
           </select>
           <button id="capReloadBtn" type="button" class="btn small primary">بارگذاری</button>
-          <button id="capResetBtn" type="button" class="btn small warn">ریست رنک</button>
+          <button id="capResetBtn" type="button" class="btn small warn">بازنشانی سطح دسترسی</button>
         </div>
         <div class="caps-grid">
           <div class="caps-box">
@@ -458,26 +458,26 @@
     <section id="intel" class="tab">
       <div class="grid-2">
         <div class="card">
-          <h3>Playbook + Reports</h3>
+          <h3>برنامه واکنش و گزارش‌ها</h3>
           <div class="row" style="margin-bottom: 10px;">
-            <input type="text" id="incidentDomain" placeholder="domain or url (for incident playbook)">
-            <button class="btn danger" id="incidentRunBtn" type="button">Run Playbook</button>
+            <input type="text" id="incidentDomain" placeholder="دامنه یا نشانی برای برنامه واکنش">
+            <button class="btn danger" id="incidentRunBtn" type="button">اجرای برنامه واکنش</button>
           </div>
           <div class="footer-actions">
-            <a class="btn" href="/admin/weekly_report" target="_blank">Weekly JSON</a>
-            <a class="btn" href="/admin/weekly_report.csv" target="_blank">Weekly CSV</a>
-            <button class="btn warn" id="rebuildBiasBtn" type="button">Rebuild Feedback Bias</button>
+            <a class="btn" href="/admin/weekly_report" target="_blank">گزارش هفتگی JSON</a>
+            <a class="btn" href="/admin/weekly_report.csv" target="_blank">گزارش هفتگی CSV</a>
+            <button class="btn warn" id="rebuildBiasBtn" type="button">بازسازی اثر بازخوردها</button>
           </div>
           <div class="muted" id="incidentResult" style="margin-top: 8px;">-</div>
         </div>
         <div class="card">
-          <h3>Honey Tokens</h3>
+          <h3>لینک‌های آموزشی امنیتی</h3>
           <div class="row">
-            <input type="text" id="honeyLabel" placeholder="label (training)">
-            <button class="btn primary" id="honeyCreateBtn" type="button">Create Honey Link</button>
+            <input type="text" id="honeyLabel" placeholder="برچسب آموزشی">
+            <button class="btn primary" id="honeyCreateBtn" type="button">ساخت لینک آموزشی</button>
           </div>
           <table id="honeyTable" style="margin-top: 8px;">
-            <thead><tr><th>Token</th><th>Label</th><th>Hits</th><th>Link</th></tr></thead>
+            <thead><tr><th>توکن</th><th>برچسب</th><th>بازدید</th><th>لینک</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -485,39 +485,39 @@
 
       <div class="grid-2">
         <div class="card">
-          <h3>Campaign Clusters</h3>
+          <h3>خوشه‌های کمپین</h3>
           <div class="row" style="margin-bottom: 8px;">
             <input type="number" id="campaignHours" value="72" min="6" max="720">
-            <button class="btn primary small" id="campaignRefreshBtn" type="button">Refresh</button>
+            <button class="btn primary small" id="campaignRefreshBtn" type="button">به‌روزرسانی</button>
           </div>
           <table id="campaignTable">
-            <thead><tr><th>ID</th><th>Count</th><th>Max Risk</th><th>Hint</th></tr></thead>
+            <thead><tr><th>شناسه</th><th>تعداد</th><th>بیشترین ریسک</th><th>نشانه</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
         <div class="card">
-          <h3>Typosquat Hunt</h3>
+          <h3>جستجوی دامنه‌های مشابه برند</h3>
           <div class="row" style="margin-bottom: 8px;">
-            <input type="text" id="typoBrand" placeholder="target brand domain, eg: paypal.com">
-            <button class="btn primary small" id="typoRunBtn" type="button">Hunt</button>
+            <input type="text" id="typoBrand" placeholder="دامنه برند هدف؛ مثلا example.com">
+            <button class="btn primary small" id="typoRunBtn" type="button">جستجو</button>
           </div>
           <table id="typoTable">
-            <thead><tr><th>Domain</th><th>Risk</th><th>Similarity</th><th>Action</th></tr></thead>
+            <thead><tr><th>دامنه</th><th>ریسک</th><th>شباهت</th><th>عملیات</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
       </div>
 
       <div class="card">
-        <h3>Team Sensitivity Policy</h3>
+        <h3>سیاست حساسیت تیم‌ها</h3>
         <table>
-          <thead><tr><th>Team</th><th>Offset</th><th>Effect</th></tr></thead>
+          <thead><tr><th>تیم</th><th>تغییر حساسیت</th><th>اثر</th></tr></thead>
           <tbody>
             {% for team, offset in team_policy.items() %}
             <tr>
-              <td>{{ team }}</td>
+              <td>{{ team_labels.get(team, team) }}</td>
               <td>{{ offset }}</td>
-              <td>{{ "strict +" ~ offset if offset > 0 else ("relaxed " ~ offset if offset < 0 else "neutral") }}</td>
+              <td>{{ "سخت‌گیرانه +" ~ offset if offset > 0 else ("آسان‌گیرانه " ~ offset if offset < 0 else "خنثی") }}</td>
             </tr>
             {% endfor %}
           </tbody>
@@ -536,12 +536,12 @@
           <div class="muted" style="margin-top:8px;">فایل فعال: <span class="mono">{{ current_extension_file or "-" }}</span></div>
         </div>
         <div class="card">
-          <h3>خروجی و Incident</h3>
+          <h3>خروجی‌ها و رخدادها</h3>
           <div class="footer-actions">
-            <a class="btn" href="/admin/backup_whitelist">دانلود Whitelist</a>
-            <a class="btn" href="/admin/backup_logs">دانلود Logs</a>
-            <a class="btn" href="/admin/export_iocs">دانلود IOC CSV</a>
-            <a class="btn" href="/admin/export_iocs?include_threat_feed=true&max_items=10000">IOC + Threat Feed</a>
+            <a class="btn" href="/admin/backup_whitelist">دانلود فهرست امن</a>
+            <a class="btn" href="/admin/backup_logs">دانلود لاگ‌ها</a>
+            <a class="btn" href="/admin/export_iocs">دانلود CSV نشانه‌ها</a>
+            <a class="btn" href="/admin/export_iocs?include_threat_feed=true&max_items=10000">نشانه‌ها همراه فید تهدید</a>
           </div>
         </div>
       </div>
@@ -677,16 +677,16 @@
         if (!body) return;
         body.innerHTML = '';
         (data.feedback || []).forEach(row => {
-          const pred = row.predicted_is_phishing ? 'Phishing' : 'Safe';
+          const pred = row.predicted_is_phishing ? 'فیشینگ' : 'ایمن';
           body.innerHTML += `<tr>
             <td>${esc(row.time)}</td>
             <td class="mono">${esc(row.domain)}</td>
             <td>${esc(row.label)}</td>
             <td>${esc(pred)} (${Number(row.predicted_probability || 0)}%)</td>
             <td class="row">
-              <button class="btn small ok f-action" data-id="${esc(row.feedback_id)}" data-a="add_whitelist">Whitelist</button>
-              <button class="btn small danger f-action" data-id="${esc(row.feedback_id)}" data-a="add_blacklist">Blacklist</button>
-              <button class="btn small warn f-action" data-id="${esc(row.feedback_id)}" data-a="dismiss">Dismiss</button>
+              <button class="btn small ok f-action" data-id="${esc(row.feedback_id)}" data-a="add_whitelist">افزودن به فهرست امن</button>
+              <button class="btn small danger f-action" data-id="${esc(row.feedback_id)}" data-a="add_blacklist">افزودن به فهرست مسدود</button>
+              <button class="btn small warn f-action" data-id="${esc(row.feedback_id)}" data-a="dismiss">بستن</button>
             </td>
           </tr>`;
         });
@@ -741,7 +741,7 @@
         const resp = await fetch(`/admin/typosquat_hunt?brand=${encodeURIComponent(brand)}&limit=50`);
         const data = await resp.json();
         if (!resp.ok) {
-          alert(data.error || 'hunt failed');
+          alert(data.error || 'جستجو ناموفق بود');
           return;
         }
         body.innerHTML = '';
@@ -750,7 +750,7 @@
             <td class="mono">${esc(row.domain)}</td>
             <td>${Number(row.risk || 0)}%</td>
             <td>${Number(row.similarity || 0)}%</td>
-            <td><button class="btn small danger typo-block" data-domain="${esc(row.domain)}">Block</button></td>
+            <td><button class="btn small danger typo-block" data-domain="${esc(row.domain)}">مسدود کن</button></td>
           </tr>`;
         });
         document.querySelectorAll('.typo-block').forEach((btn) => {
@@ -759,7 +759,7 @@
             const form = new FormData();
             form.append('site', btn.dataset.domain || '');
             const r = await fetch('/admin/add_blacklist', {method: 'POST', body: form});
-            btn.textContent = r.ok ? 'Blocked' : 'Error';
+            btn.textContent = r.ok ? 'مسدود شد' : 'خطا';
             if (r.ok) refreshDashboard();
           });
         });
@@ -770,7 +770,7 @@
       const target = document.getElementById('incidentDomain')?.value.trim();
       const out = document.getElementById('incidentResult');
       if (!target || !out) return;
-      out.textContent = 'Running...';
+      out.textContent = 'در حال اجرا...';
       try {
         const resp = await fetch('/admin/incident_playbook', {
           method: 'POST',
@@ -779,13 +779,13 @@
         });
         const data = await resp.json();
         if (!resp.ok) {
-          out.textContent = data.error || 'failed';
+          out.textContent = data.error || 'ناموفق بود';
           return;
         }
-        out.textContent = `Blocked: ${data.domain} | Timeline: ${Number(data.timeline_points || 0)} | Clusters: ${(data.related_clusters || []).length}`;
+        out.textContent = `دامنه مسدود شد: ${data.domain} | نقاط زمانی: ${Number(data.timeline_points || 0)} | خوشه‌ها: ${(data.related_clusters || []).length}`;
         refreshDashboard();
       } catch (_e) {
-        out.textContent = 'network error';
+        out.textContent = 'خطای شبکه';
       }
     }
 
@@ -793,21 +793,21 @@
       const btn = document.getElementById('rebuildBiasBtn');
       if (!btn) return;
       btn.disabled = true;
-      btn.textContent = 'Running...';
+      btn.textContent = 'در حال اجرا...';
       try {
         const r = await fetch('/admin/rebuild_feedback_bias?limit=7000', {method: 'POST'});
         const data = await r.json();
         if (r.ok) {
-          btn.textContent = `Done (${Number(data.domains || 0)} domains)`;
+          btn.textContent = `انجام شد (${Number(data.domains || 0)} دامنه)`;
         } else {
-          btn.textContent = data.error || 'Failed';
+          btn.textContent = data.error || 'ناموفق بود';
         }
       } catch (_e) {
-        btn.textContent = 'Network error';
+        btn.textContent = 'خطای شبکه';
       } finally {
         setTimeout(() => {
           btn.disabled = false;
-          btn.textContent = 'Rebuild Feedback Bias';
+          btn.textContent = 'بازسازی اثر بازخوردها';
         }, 1200);
       }
     }
@@ -838,7 +838,7 @@
     document.getElementById('incidentRunBtn')?.addEventListener('click', runIncidentPlaybook);
     document.getElementById('rebuildBiasBtn')?.addEventListener('click', rebuildFeedbackBias);
     document.getElementById('honeyCreateBtn')?.addEventListener('click', async () => {
-      const label = document.getElementById('honeyLabel')?.value.trim() || 'training';
+      const label = document.getElementById('honeyLabel')?.value.trim() || 'آموزشی';
       const r = await fetch('/admin/honey_tokens', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -881,7 +881,7 @@
             body: JSON.stringify(payload),
           });
           if (!r.ok) {
-            alert('ذخیره تنظیم رنک ناموفق بود');
+            alert('ذخیره تنظیم سطح دسترسی ناموفق بود');
             cb.checked = !cb.checked;
             return;
           }
@@ -910,7 +910,7 @@
     document.getElementById('capRankSelect')?.addEventListener('change', renderRankCaps);
     document.getElementById('capResetBtn')?.addEventListener('click', async () => {
       const rank = document.getElementById('capRankSelect').value;
-      if (!confirm(`ریست تنظیمات رنک ${rank}؟`)) return;
+      if (!confirm(`ریست تنظیمات سطح دسترسی ${rank}؟`)) return;
       const r = await fetch('/admin/rank_caps/reset', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
